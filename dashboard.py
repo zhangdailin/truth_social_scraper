@@ -3,10 +3,7 @@ import json
 import time
 import os
 import pandas as pd
-import streamlit.components.v1 as components
-from monitor_trump import generate_history, generate_simulated_post, save_alert, extract_keywords, analyze_with_ai, run_one_check, run_one_check_free
-
-from datetime import datetime
+from datetime import datetime, timezone
 
 # ==========================================
 # 1. PAGE CONFIGURATION
@@ -217,23 +214,49 @@ def load_alerts():
     try:
         with open(ALERTS_FILE, "r") as f:
             data = json.load(f)
-            # Ensure sorting
-            data.sort(key=lambda x: x.get('created_at', ''), reverse=True)
-            
-            # Deduplicate by content (keep newest) to avoid visual clutter
-            unique_data = []
-            seen_content = set()
-            for alert in data:
-                content = alert.get('content', '').strip()
-                if content not in seen_content:
-                    unique_data.append(alert)
-                    seen_content.add(content)
-            
-            return unique_data
+            def _parse_ts(s):
+                try:
+                    return datetime.fromisoformat((s or '').replace('Z',''))
+                except Exception:
+                    return datetime.min
+            data.sort(key=lambda x: _parse_ts(x.get('detected_at') or x.get('created_at') or ''), reverse=True)
+            return data
     except Exception:
         return []
 
+# Helper: convert ISO timestamp to local browser-like timezone string
+def to_local_str(iso_str):
+    try:
+        if not iso_str:
+            return ""
+        s = iso_str.replace('Z', '+00:00')
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone().strftime('%Y-%m-%d %H:%M')
+    except Exception:
+        return (iso_str or '')[:16].replace('T', ' ')
+
 alerts = load_alerts()
+if not alerts:
+    try:
+        from monitor_trump import generate_history
+        generate_history()
+        alerts = load_alerts()
+    except Exception:
+        alerts = []
+
+if 'last_api_check' not in st.session_state:
+    st.session_state['last_api_check'] = 0.0
+if time.time() - float(st.session_state['last_api_check']) >= 300:
+    try:
+        from monitor_trump import run_one_check
+        run_one_check()
+    except Exception:
+        pass
+    finally:
+        st.session_state['last_api_check'] = time.time()
+        alerts = load_alerts()
 
 # Initialize session state for audio alerts
 if 'last_played_alert_id' not in st.session_state:
@@ -267,40 +290,15 @@ with c_header:
     st.caption("Powered by **DeepSeek-V3** via SiliconFlow")
 
 with c_control:
-    # Compact Control Panel placed at the top
     st.markdown("**⚙️ System Control**")
     refresh_rate = st.slider("Auto-refresh (sec)", 5, 60, 10)
-    only_real = st.checkbox("Only show real posts", value=False)
     st.success(f"● Online | {datetime.now().strftime('%H:%M:%S')}")
-    col_a, col_b = st.columns(2)
-    with col_a:
-        if st.button("Seed History"):
-            generate_history()
-            st.toast("Seeded history", icon="✅")
-            st.rerun()
-    with col_b:
-        if st.button("Simulate Post"):
-            p = generate_simulated_post()
-            kw = extract_keywords(p.get("content", "") )
-            ai = analyze_with_ai(p.get("content", "") )
-            save_alert(p, kw, ai, source="simulated")
-            st.toast("Simulated post added", icon="✅")
-            st.rerun()
-    if st.button("Run One Check"):
-        cnt = run_one_check()
-        st.toast(f"Run complete: {cnt} new", icon="✅")
-        st.rerun()
-    if st.button("Run Free Check (RSS)"):
-        cnt = run_one_check_free()
-        st.toast(f"Free check complete: {cnt} new", icon="✅")
-        st.rerun()
 
 st.markdown("---")
 
 # Metrics Grid
-view_alerts = [a for a in alerts if (a.get('source', 'real') == 'real' or not only_real)]
-if view_alerts:
-    latest = view_alerts[0]
+if alerts:
+    latest = alerts[0]
     high_impact_count = sum(1 for a in alerts if a.get('ai_analysis', {}).get('impact'))
     
     c1, c2, c3, c4 = st.columns(4)
@@ -373,7 +371,7 @@ if view_alerts:
 {'🚨 HIGH MARKET IMPACT' if is_high_impact else '✅ LOW IMPACT'}
 </span>
 <span class="tag tag-gray">{'REAL' if latest.get('source','real')=='real' else 'SIMULATED'}</span>
-<span style="color:#64748B; font-size:12px;">{latest.get('created_at', '')[:16].replace('T', ' ')}</span>
+<span style="color:#64748B; font-size:12px;">{to_local_str(latest.get('detected_at') or latest.get('created_at', ''))}</span>
 </div>
 <div class="post-content">“{latest['content']}”</div>
 {rec_html}
@@ -392,7 +390,7 @@ if view_alerts:
         st.subheader("📜 Recent Posts")
     
     # List Layout
-    for alert in view_alerts[1:5]:
+    for alert in alerts[1:6]:
         ai = alert.get('ai_analysis', {})
         impact = ai.get('impact', False)
         
@@ -405,8 +403,7 @@ if view_alerts:
             with fc2:
                 # Custom HTML for the card content to ensure tight spacing
                 st.markdown(f"**{alert['content'][:120]}...**")
-                ts = alert.get('created_at', '')
-                ts_disp = ts[:16].replace('T',' ')
+                ts_disp = to_local_str(alert.get('detected_at') or alert.get('created_at', ''))
                 st.caption(f"🕒 {ts_disp}")
                 
                 # Metadata row
