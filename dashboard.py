@@ -341,8 +341,10 @@ if alerts:
     st.markdown("<br>", unsafe_allow_html=True)
     latest_time_str = latest.get('created_at', '')
     try:
-        ts = datetime.fromisoformat(latest_time_str.replace('Z',''))
-        age_min = int((datetime.utcnow() - ts).total_seconds() / 60)
+        ts = datetime.fromisoformat(latest_time_str.replace('Z','+00:00'))
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        age_min = int((datetime.now(timezone.utc) - ts.astimezone(timezone.utc)).total_seconds() / 60)
         if age_min > 60:
             st.warning(f"Data age {age_min} min")
     except Exception:
