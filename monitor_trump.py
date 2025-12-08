@@ -8,6 +8,9 @@ from apify_client import ApifyClient
 from apify_client.errors import ApifyApiError
 from openai import OpenAI
 from ddgs import DDGS
+import requests
+import xml.etree.ElementTree as ET
+import html
 
 # ==========================================
 # CONFIGURATION
@@ -397,6 +400,49 @@ def run_one_check():
             dataset_items = [generate_simulated_post()]
         except Exception:
             dataset_items = []
+    processed_ids = load_processed_posts()
+    new_posts_count = 0
+    for post in dataset_items:
+        post_id = post.get("id")
+        if post_id and post_id not in processed_ids:
+            new_posts_count += 1
+            content = post.get("content") or post.get("text", "")
+            keywords = extract_keywords(content)
+            ai_result = analyze_with_ai(content)
+            save_alert(post, keywords, ai_result, source="real")
+            processed_ids.add(post_id)
+    save_processed_posts(processed_ids)
+    return new_posts_count
+
+def fetch_rss_posts(limit=5):
+    url = "https://truthsocial.com/@realDonaldTrump.rss"
+    try:
+        resp = requests.get(url, timeout=10)
+        if resp.status_code != 200:
+            return []
+        root = ET.fromstring(resp.text)
+        channel = root.find('channel')
+        items = channel.findall('item') if channel is not None else []
+        posts = []
+        for it in items[:limit]:
+            link = (it.findtext('link') or '').strip()
+            title = (it.findtext('title') or '').strip()
+            desc = (it.findtext('description') or '').strip()
+            pub = (it.findtext('pubDate') or '').strip()
+            content = html.unescape(desc or title)
+            pid = link.split('/')[-1] if link else f"rss_{int(time.time())}"
+            posts.append({
+                "id": pid,
+                "created_at": pub,
+                "content": content,
+                "url": link
+            })
+        return posts
+    except Exception:
+        return []
+
+def run_one_check_free():
+    dataset_items = fetch_rss_posts(limit=5)
     processed_ids = load_processed_posts()
     new_posts_count = 0
     for post in dataset_items:

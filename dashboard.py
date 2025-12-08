@@ -4,7 +4,7 @@ import time
 import os
 import pandas as pd
 import streamlit.components.v1 as components
-from monitor_trump import generate_history, generate_simulated_post, save_alert, extract_keywords, analyze_with_ai, run_one_check
+from monitor_trump import generate_history, generate_simulated_post, save_alert, extract_keywords, analyze_with_ai, run_one_check, run_one_check_free
 
 from datetime import datetime
 
@@ -289,6 +289,10 @@ with c_control:
     if st.button("Run One Check"):
         cnt = run_one_check()
         st.toast(f"Run complete: {cnt} new", icon="✅")
+        st.rerun()
+    if st.button("Run Free Check (RSS)"):
+        cnt = run_one_check_free()
+        st.toast(f"Free check complete: {cnt} new", icon="✅")
         st.rerun()
 
 st.markdown("---")
