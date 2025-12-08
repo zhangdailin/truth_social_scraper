@@ -248,7 +248,7 @@ if not alerts:
         alerts = []
 
 if 'last_api_check' not in st.session_state:
-    st.session_state['last_api_check'] = 0.0
+    st.session_state['last_api_check'] = time.time()
 if time.time() - float(st.session_state['last_api_check']) >= 300:
     try:
         from monitor_trump import run_one_check
