@@ -43,6 +43,11 @@ st.markdown("""
         color: #1E293B;
     }
 
+    hr {
+        margin: 6px 0 !important;
+        border-top: 1px solid #E2E8F0 !important;
+    }
+
     /* Metric Cards */
     .metric-container {
         background-color: #FFFFFF;
@@ -255,6 +260,10 @@ def to_local_str(iso_str):
     except Exception:
         return (iso_str or '')[:16].replace('T', ' ')
 
+def local_tz_label():
+    _now_local = datetime.now(timezone.utc).astimezone()
+    return _now_local.strftime('UTC%z')
+
 def pick_ts_str(alert):
     return alert.get('created_at') or alert.get('createdAt') or alert.get('detected_at') or ''
 
@@ -322,7 +331,9 @@ with c_control:
     refresh_rate = st.slider("Auto-refresh (sec)", 5, 60, 10)
     fetch_interval_min = st.slider("Fetch interval (min)", 5, 120, 30)
     st.session_state['check_interval_seconds'] = int(fetch_interval_min * 60)
-    st.success(f"● Online | {datetime.now().strftime('%H:%M:%S')}")
+    _now_local = datetime.now(timezone.utc).astimezone()
+    _tz_label = local_tz_label()
+    st.success(f"● Online | {_now_local.strftime('%H:%M:%S')} ({_tz_label})")
 
 st.markdown("---")
 
@@ -360,10 +371,18 @@ if alerts:
         """, unsafe_allow_html=True)
         
     with c4:
+        try:
+            _lts = pick_ts_str(latest)
+            _ts = datetime.fromisoformat(_lts.replace('Z','+00:00'))
+            if _ts.tzinfo is None:
+                _ts = _ts.replace(tzinfo=timezone.utc)
+            _age_min2 = int((datetime.now(timezone.utc) - _ts.astimezone(timezone.utc)).total_seconds() / 60)
+        except Exception:
+            _age_min2 = 0
         st.markdown(f"""
         <div class="metric-container">
-            <div class="metric-label">Last Activity</div>
-            <div class="metric-value">{datetime.now().strftime('%H:%M')}</div>
+            <div class="metric-label">Latest Post Age</div>
+            <div class="metric-value">{_age_min2} min</div>
         </div>
         """, unsafe_allow_html=True)
 
@@ -406,7 +425,7 @@ if alerts:
 {'🚨 HIGH MARKET IMPACT' if is_high_impact else '✅ LOW IMPACT'}
 </span>
 <span class="tag tag-gray">{'REAL' if latest.get('source','real')=='real' else 'SIMULATED'}</span>
-<span style="color:#64748B; font-size:12px;">{to_local_str(pick_ts_str(latest))}</span>
+<span style="color:#64748B; font-size:12px;">{to_local_str(pick_ts_str(latest))} ({local_tz_label()})</span>
 </div>
 <div class="post-content">“{latest.get('content','')}”</div>
 {rec_html}
@@ -447,7 +466,7 @@ if alerts:
 <div style=\"display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;\">
 <span class=\"tag {'tag-red' if is_high else 'tag-green'}\">{'🚨 HIGH MARKET IMPACT' if is_high else '✅ LOW IMPACT'}</span>
 <span class=\"tag tag-gray\">{'REAL' if alert.get('source','real')=='real' else 'SIMULATED'}</span>
-<span style=\"color:#64748B; font-size:12px;\">{ts_disp}</span>
+<span style=\"color:#64748B; font-size:12px;\">{ts_disp} ({local_tz_label()})</span>
 </div>
 <div class=\"post-content\">“{alert.get('content','')}”</div>
 {rec_html}
