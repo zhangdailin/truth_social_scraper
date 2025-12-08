@@ -232,7 +232,8 @@ def to_local_str(iso_str):
         s = iso_str.replace('Z', '+00:00')
         dt = datetime.fromisoformat(s)
         if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
+            local_tz = datetime.now().astimezone().tzinfo
+            dt = dt.replace(tzinfo=local_tz)
         return dt.astimezone().strftime('%Y-%m-%d %H:%M')
     except Exception:
         return (iso_str or '')[:16].replace('T', ' ')
@@ -356,24 +357,27 @@ if alerts:
     recommendation = latest_ai.get('recommendation', 'None')
     rec_html = ""
     if recommendation and recommendation != "None":
-         # Inject tooltips into recommendation text
-         assets = latest_ai.get('affected_assets', [])
-         recommendation_with_tooltips = inject_stock_tooltips(recommendation, assets)
-         
-         rec_html = f"""<div style="margin-top:12px; padding:12px; background-color:#FEF3C7; border-left:4px solid #F59E0B; border-radius:4px;">
+        # Inject tooltips into recommendation text
+        assets = latest_ai.get('affected_assets', [])
+        try:
+            recommendation_with_tooltips = inject_stock_tooltips(recommendation, assets)
+        except Exception:
+            recommendation_with_tooltips = recommendation
+        
+        rec_html = f"""<div style="margin-top:12px; padding:12px; background-color:#FEF3C7; border-left:4px solid #F59E0B; border-radius:4px;">
 <strong style="color:#B45309;">💰 Trading Recommendation:</strong> 
 <span style="color:#92400E; font-weight:600;">{recommendation_with_tooltips}</span>
 </div>"""
-
+    
     st.markdown(f"""<div class="hero-card {impact_class}">
 <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
 <span class="tag {'tag-red' if is_high_impact else 'tag-green'}">
 {'🚨 HIGH MARKET IMPACT' if is_high_impact else '✅ LOW IMPACT'}
 </span>
 <span class="tag tag-gray">{'REAL' if latest.get('source','real')=='real' else 'SIMULATED'}</span>
-<span style="color:#64748B; font-size:12px;">{to_local_str(latest.get('detected_at') or latest.get('created_at', ''))}</span>
+<span style="color:#64748B; font-size:12px;">{to_local_str(latest.get('created_at', ''))}</span>
 </div>
-<div class="post-content">“{latest['content']}”</div>
+<div class="post-content">“{latest.get('content','')}”</div>
 {rec_html}
 <div style="margin-top:16px; padding-top:16px; border-top:1px solid #E2E8F0;">
 <div style="font-weight:600; font-size:14px; color:#475569; margin-bottom:4px;">🤖 AI Analyst Notes:</div>
@@ -402,8 +406,8 @@ if alerts:
             
             with fc2:
                 # Custom HTML for the card content to ensure tight spacing
-                st.markdown(f"**{alert['content'][:120]}...**")
-                ts_disp = to_local_str(alert.get('detected_at') or alert.get('created_at', ''))
+                st.markdown(f"**{alert.get('content','')[:120]}...**")
+                ts_disp = to_local_str(alert.get('created_at', ''))
                 st.caption(f"🕒 {ts_disp}")
                 
                 # Metadata row
@@ -415,9 +419,12 @@ if alerts:
                 # Show recommendation in feed as well if exists
                 rec = ai.get('recommendation', 'None')
                 if rec and rec != "None":
-                     # Inject tooltips here too
-                     rec_with_tooltips = inject_stock_tooltips(rec, assets)
-                     st.markdown(f"<div style='margin-bottom: 4px;'><strong>💰 Rec:</strong> <span style='color: #F97316;'>{rec_with_tooltips}</span></div>", unsafe_allow_html=True)
+                    # Inject tooltips here too
+                    try:
+                        rec_with_tooltips = inject_stock_tooltips(rec, assets)
+                    except Exception:
+                        rec_with_tooltips = rec
+                    st.markdown(f"<div style='margin-bottom: 4px;'><strong>💰 Rec:</strong> <span style='color: #F97316;'>{rec_with_tooltips}</span></div>", unsafe_allow_html=True)
 
                 if 'external_context_used' in ai:
                      context_text = ai['external_context_used'].replace('News Context:', '').strip()
@@ -427,8 +434,8 @@ if alerts:
                     st.markdown(f"<span class='tag tag-gray'>Assets: {assets_str}</span>", unsafe_allow_html=True)
                 
                 with st.expander("View Details"):
-                    st.write(alert['content'])
-                    st.link_button("Original Post", alert['url'])
+                    st.write(alert.get('content',''))
+                    st.link_button("Original Post", alert.get('url','https://truthsocial.com/@realDonaldTrump'))
             
             st.divider()
 
@@ -440,8 +447,8 @@ if alerts:
             st.dataframe(
                 pd.DataFrame([
                     {
-                        "Date": a.get('created_at', '')[:16].replace('T', ' '),
-                        "Content": a['content'],
+                        "Date": to_local_str(a.get('created_at', '')),
+                        "Content": a.get('content',''),
                         "Impact": "High" if a.get('ai_analysis', {}).get('impact') else "Low",
                         "Sentiment": a.get('ai_analysis', {}).get('sentiment', '-'),
                         "AI Reasoning": a.get('ai_analysis', {}).get('reasoning', '-'),
@@ -449,9 +456,8 @@ if alerts:
                     }
                     for a in alerts[5:]
                 ]),
-                use_container_width=True
+                width='stretch'
             )
-
 else:
     st.info("System initializing... Waiting for first data fetch.")
 
