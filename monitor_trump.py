@@ -343,64 +343,64 @@ def generate_simulated_post():
         "url": "https://truthsocial.com/@realDonaldTrump"
     }
 
-def run_one_check():
-    if not APIFY_TOKEN:
-        return 0
-    else:
-        client = ApifyClient(APIFY_TOKEN)
-        run_input = {"searchQueries": ["realDonaldTrump"], "resultsLimit": 5, "maxItems": 5}
-        dataset_items = []
-        try:
-            run = client.actor("muhammetakkurtt/truth-social-scraper").call(run_input=run_input)
-            if run:
-                dataset_items = client.dataset(run["defaultDatasetId"]).iterate_items()
-            else:
-                dataset_items = [generate_simulated_post()]
-        except ApifyApiError:
-            dataset_items = []
-        except Exception:
-            dataset_items = []
-    processed_ids = load_processed_posts()
-    new_posts_count = 0
-    for post in dataset_items:
-        post_id = post.get("id")
-        if post_id and post_id not in processed_ids:
-            new_posts_count += 1
-            content = post.get("content") or post.get("text", "")
-            keywords = extract_keywords(content)
-            ai_result = analyze_with_ai(content)
-            save_alert(post, keywords, ai_result, source="real")
-            processed_ids.add(post_id)
-    save_processed_posts(processed_ids)
-    return new_posts_count
+def norm_ts_to_utc_iso(s):
+    try:
+        if not s:
+            return datetime.now(timezone.utc).isoformat()
+        s2 = str(s).replace('Z','+00:00')
+        dt = datetime.fromisoformat(s2)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc).isoformat()
+    except Exception:
+        return datetime.now(timezone.utc).isoformat()
 
-def run_fetch_recent(limit=20):
-    if not APIFY_TOKEN:
-        return 0
+def get_apify_items(limit):
     client = ApifyClient(APIFY_TOKEN)
     run_input = {"searchQueries": ["realDonaldTrump"], "resultsLimit": int(limit), "maxItems": int(limit)}
-    dataset_items = []
+    items = []
     try:
         run = client.actor("muhammetakkurtt/truth-social-scraper").call(run_input=run_input)
         if run:
-            dataset_items = client.dataset(run["defaultDatasetId"]).iterate_items()
+            items = list(client.dataset(run["defaultDatasetId"]).iterate_items())
+        else:
+            items = [generate_simulated_post()]
     except ApifyApiError:
-        dataset_items = []
+        items = []
     except Exception:
-        dataset_items = []
+        items = []
+    return items
+
+def process_items_recursive(items, i, processed_ids, new_posts_count):
+    if i >= len(items):
+        return new_posts_count, processed_ids
+    post = items[i]
+    post_id = post.get("id")
+    if post_id and post_id not in processed_ids:
+        content = post.get("content") or post.get("text", "")
+        keywords = extract_keywords(content)
+        ai_result = analyze_with_ai(content)
+        created = post.get("createdAt") or post.get("created_at")
+        created_iso = norm_ts_to_utc_iso(created)
+        save_alert({"id": post_id, "content": content, "created_at": created_iso, "url": post.get("url", "https://truthsocial.com/@realDonaldTrump")}, keywords, ai_result, source="real")
+        processed_ids.add(post_id)
+        new_posts_count += 1
+    return process_items_recursive(items, i + 1, processed_ids, new_posts_count)
+
+def fetch_from_apify(limit):
+    if not APIFY_TOKEN:
+        return 0
+    items = get_apify_items(limit)
     processed_ids = load_processed_posts()
-    new_posts_count = 0
-    for post in dataset_items:
-        post_id = post.get("id")
-        if post_id and post_id not in processed_ids:
-            new_posts_count += 1
-            content = post.get("content") or post.get("text", "")
-            keywords = extract_keywords(content)
-            ai_result = analyze_with_ai(content)
-            save_alert(post, keywords, ai_result, source="real")
-            processed_ids.add(post_id)
+    new_posts_count, processed_ids = process_items_recursive(items, 0, processed_ids, 0)
     save_processed_posts(processed_ids)
     return new_posts_count
+
+def run_one_check():
+    return fetch_from_apify(5)
+
+def run_fetch_recent(limit=20):
+    return fetch_from_apify(int(limit))
 
 def purge_simulated_alerts():
     if not os.path.exists(ALERTS_FILE):

@@ -328,7 +328,6 @@ with c_header:
 
 with c_control:
     st.markdown("**⚙️ System Control**")
-    refresh_rate = st.slider("Auto-refresh (sec)", 5, 60, 10)
     fetch_interval_min = st.slider("Fetch interval (min)", 5, 120, 30)
     st.session_state['check_interval_seconds'] = int(fetch_interval_min * 60)
     _now_local = datetime.now(timezone.utc).astimezone()
@@ -512,7 +511,3 @@ st.markdown(
     """,
     unsafe_allow_html=True
 )
-
-# Auto-refresh
-time.sleep(refresh_rate)
-st.rerun()

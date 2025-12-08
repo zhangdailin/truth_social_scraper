@@ -26,8 +26,6 @@ $env:APIFY_TOKEN="你的Apify令牌"
 # SiliconFlow（用于 AI 分析 DeepSeek-V3）
 $env:SILICONFLOW_API_KEY="你的SiliconFlow密钥"
 
-# Factbase/Factsquared（可选：作为有密钥的备选数据源）
-$env:FACTBASE_API_KEY="你的Factbase密钥"
 ```
 3. 运行仪表盘
 ```
@@ -43,13 +41,9 @@ streamlit run dashboard.py
 - 底部档案区：以表格展开更旧的推文记录
 
 ## 数据来源与抓取逻辑
-- Apify（默认）：
-  - `monitor_trump.py:346-378` 使用 Apify Truth Social Scraper 抓取
+- Apify：
+  - `monitor_trump.py:356-383` 使用 Apify Truth Social Scraper 抓取
   - 需设置环境变量 `APIFY_TOKEN`
-- Factbase/Factsquared（可选）：
-  - `monitor_trump.py:430-498` 通过 `FACTBASE_API_KEY` 接口抓取，优先使用（若已配置）
-  - 请求参数示例：`topic=social&sort=desc&page=1&spage=1&media=truth_social`
-  - 若接口返回错误或未授权，安全回退，不影响页面
 - 首次加载与定时抓取：
   - 页面初次无数据时尝试拉取最近数据 `run_fetch_recent`
   - 后续按 `Fetch interval (min)` 定时调用 `run_one_check`
@@ -77,10 +71,9 @@ streamlit run dashboard.py
 ## 常见问题
 - “Data age XXX min” 提示：表示最新推文本身距离当前的分钟数，并非抓取延迟。
 - 没有新数据：
-  - 检查 `APIFY_TOKEN` 或 `FACTBASE_API_KEY` 是否有效
+  - 检查 `APIFY_TOKEN` 是否有效
   - 网络环境是否可达数据源接口
   - `Fetch interval (min)` 是否配置过大
-- Factbase 返回 400：通常需要授权或特定来源上下文；已支持密钥头部，若仍失败请联系接口方确认授权策略。
 
 ## 安全与隐私
 - 不会在日志中打印或存储你的密钥；请通过环境变量提供令牌与密钥
