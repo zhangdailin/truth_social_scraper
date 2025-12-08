@@ -20,11 +20,11 @@ PROCESSED_LOG_FILE = os.path.join(PROJECT_ROOT, "processed_posts.json")
 ALERTS_FILE = os.path.join(PROJECT_ROOT, "market_alerts.json")
 
 # SiliconFlow API Configuration
-SILICONFLOW_API_KEY = os.getenv("SILICONFLOW_API_KEY") 
+SILICONFLOW_API_KEY = os.getenv("SILICONFLOW_API_KEY")  or "sk-vfiiyizfqtxlhsfurukjvjdhhjoujoziniixmskejftkcqfn"
 BASE_URL = "https://api.siliconflow.cn/v1"
 
 # Apify Configuration
-APIFY_TOKEN = os.getenv("APIFY_TOKEN") 
+APIFY_TOKEN = os.getenv("APIFY_TOKEN") or "apify_api_6a0tpEjsNdEzIY5lcXGAlcLeC6n2tT3SLBVX"
 
 # Basic stop words to filter out common noise
 STOP_WORDS = {
@@ -139,38 +139,30 @@ def fetch_external_context(query_text):
     Uses extracted keywords to find relevant market news and discussions.
     """
     try:
-        # Extract keywords
         keywords = extract_keywords(query_text)
-        
-        # If no keywords found (e.g. very short post), fallback to raw text
         if not keywords:
             keywords = query_text[:50]
-            
-        # Construct search queries
-        search_query_news = f"Donald Trump {keywords} market news"
-        search_query_market = f"Donald Trump {keywords} stock market reaction"
-        
+        q_news = re.sub(r"\s+", " ", f"Donald Trump {keywords} market news").strip()
+        q_market = re.sub(r"\s+", " ", f"Donald Trump {keywords} stock market reaction").strip()
+        q_news = re.sub(r"[\)\:]+$", "", q_news)
+        q_market = re.sub(r"[\)\:]+$", "", q_market)
         results = []
         with DDGS() as ddgs:
-            # 1. Search for specific News
             try:
-                news_gen = ddgs.news(search_query_news, max_results=2)
+                news_gen = ddgs.news(q_news, max_results=2)
                 if news_gen:
                     results.extend([f"[News] {r['title']}: {r['body']}" for r in news_gen])
-            except Exception as e:
-                print(f"News search error: {e}")
-            
-            # 2. Search for Market Reaction (Web)
+            except Exception:
+                pass
             try:
-                web_gen = ddgs.text(search_query_market, max_results=2)
+                web_gen = ddgs.text(q_market, max_results=2)
                 if web_gen:
                     results.extend([f"[Market Discussion] {r['title']}: {r['body']}" for r in web_gen])
-            except Exception as e:
-                print(f"Web search error: {e}")
-                    
+            except Exception:
+                pass
         return "\n".join(results) if results else "No related external news found."
-    except Exception as e:
-        return f"Error fetching external context: {str(e)}"
+    except Exception:
+        return "No related external news found."
 
 def get_recent_posts_context(limit=3):
     """Retrieves the last few posts to provide trend context for AI analysis."""
@@ -387,13 +379,11 @@ def generate_simulated_post():
     return post
 
 def run_monitoring_loop():
-    api_token = os.getenv("APIFY_TOKEN") or "apify_api_6a0tpEjsNdEzIY5lcXGAlcLeC6n2tT3SLBVX"
-    
-    if not api_token:
+    if not APIFY_TOKEN:
         print("Error: APIFY_TOKEN not found.")
         return
 
-    client = ApifyClient(api_token)
+    client = ApifyClient(APIFY_TOKEN)
     processed_ids = load_processed_posts()
     
     print(f"Starting monitoring... Loaded {len(processed_ids)} processed posts.")
