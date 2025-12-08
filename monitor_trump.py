@@ -289,9 +289,22 @@ def save_alert(post, keywords, ai_analysis=None, source=None):
     """
     Saves an alert to a JSON file for the dashboard to read.
     """
+    created_raw = post.get("createdAt") or post.get("created_at")
+    try:
+        if created_raw:
+            s = str(created_raw).replace('Z', '+00:00')
+            dt = datetime.fromisoformat(s)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            created_iso = dt.astimezone(timezone.utc).isoformat()
+        else:
+            created_iso = datetime.now(timezone.utc).isoformat()
+    except Exception:
+        created_iso = datetime.now(timezone.utc).isoformat()
+
     alert_data = {
         "id": post.get("id"),
-        "created_at": post.get("createdAt") or post.get("created_at") or datetime.now(timezone.utc).isoformat(),
+        "created_at": created_iso,
         "content": post.get("content") or post.get("text", ""),
         "url": post.get("url", "https://truthsocial.com/@realDonaldTrump"),
         "keywords": keywords,
