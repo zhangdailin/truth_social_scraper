@@ -176,7 +176,7 @@ st.markdown("""
 # 3. DATA LOADING
 # ==========================================
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
+PROJECT_ROOT = SCRIPT_DIR
 ALERTS_FILE = os.path.join(PROJECT_ROOT, "market_alerts.json")
 
 # Base64 encoded alarm sound (short beep)

@@ -14,7 +14,7 @@ from ddgs import DDGS
 # ==========================================
 # Determine paths relative to this script to ensure consistency
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-PROJECT_ROOT = os.path.dirname(SCRIPT_DIR) # Go up one level to 'L'
+PROJECT_ROOT = SCRIPT_DIR
 
 PROCESSED_LOG_FILE = os.path.join(PROJECT_ROOT, "processed_posts.json")
 ALERTS_FILE = os.path.join(PROJECT_ROOT, "market_alerts.json")
