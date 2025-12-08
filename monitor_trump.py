@@ -285,7 +285,7 @@ def save_processed_posts(processed_ids):
     with open(PROCESSED_LOG_FILE, "w") as f:
         json.dump(list(processed_ids), f)
 
-def save_alert(post, keywords, ai_analysis=None):
+def save_alert(post, keywords, ai_analysis=None, source=None):
     """
     Saves an alert to a JSON file for the dashboard to read.
     """
@@ -296,7 +296,8 @@ def save_alert(post, keywords, ai_analysis=None):
         "url": post.get("url", "https://truthsocial.com/@realDonaldTrump"),
         "keywords": keywords,
         "ai_analysis": ai_analysis,
-        "detected_at": datetime.now().isoformat()
+        "detected_at": datetime.now().isoformat(),
+        "source": source or ("simulated" if str(post.get("id", "")).startswith("simulated") else "real")
     }
 
     alerts = []
@@ -351,7 +352,8 @@ def generate_history():
             "url": f"https://truthsocial.com/@realDonaldTrump/{post_id}",
             "keywords": "simulation history",
             "ai_analysis": ai_analysis,
-            "detected_at": datetime.now().isoformat()
+            "detected_at": datetime.now().isoformat(),
+            "source": "simulated"
         }
         
         alerts.append(alert)
@@ -378,6 +380,36 @@ def generate_simulated_post():
     }
     return post
 
+def run_one_check():
+    if not APIFY_TOKEN:
+        dataset_items = [generate_simulated_post()]
+    else:
+        client = ApifyClient(APIFY_TOKEN)
+        run_input = {"searchQueries": ["realDonaldTrump"], "resultsLimit": 5, "maxItems": 5}
+        dataset_items = []
+        try:
+            run = client.actor("muhammetakkurtt/truth-social-scraper").call(run_input=run_input)
+            if run:
+                dataset_items = client.dataset(run["defaultDatasetId"]).iterate_items()
+            else:
+                dataset_items = [generate_simulated_post()]
+        except ApifyApiError:
+            dataset_items = [generate_simulated_post()]
+        except Exception:
+            dataset_items = []
+    processed_ids = load_processed_posts()
+    new_posts_count = 0
+    for post in dataset_items:
+        post_id = post.get("id")
+        if post_id and post_id not in processed_ids:
+            new_posts_count += 1
+            content = post.get("content") or post.get("text", "")
+            keywords = extract_keywords(content)
+            ai_result = analyze_with_ai(content)
+            save_alert(post, keywords, ai_result, source="real")
+            processed_ids.add(post_id)
+    save_processed_posts(processed_ids)
+    return new_posts_count
 def run_monitoring_loop():
     if not APIFY_TOKEN:
         print("Error: APIFY_TOKEN not found.")
@@ -447,8 +479,7 @@ def run_monitoring_loop():
                     else:
                         print(f"ℹ️ AI says no major impact.")
 
-                    # Save Alert for Dashboard (Include AI result)
-                    save_alert(post, keywords, ai_result)
+                    save_alert(post, keywords, ai_result, source="real")
 
                     processed_ids.add(post_id)
             

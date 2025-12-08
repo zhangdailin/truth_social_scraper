@@ -4,6 +4,7 @@ import time
 import os
 import pandas as pd
 import streamlit.components.v1 as components
+from monitor_trump import generate_history, generate_simulated_post, save_alert, extract_keywords, analyze_with_ai, run_one_check
 
 from datetime import datetime
 
@@ -269,13 +270,33 @@ with c_control:
     # Compact Control Panel placed at the top
     st.markdown("**⚙️ System Control**")
     refresh_rate = st.slider("Auto-refresh (sec)", 5, 60, 10)
+    only_real = st.checkbox("Only show real posts", value=False)
     st.success(f"● Online | {datetime.now().strftime('%H:%M:%S')}")
+    col_a, col_b = st.columns(2)
+    with col_a:
+        if st.button("Seed History"):
+            generate_history()
+            st.toast("Seeded history", icon="✅")
+            st.rerun()
+    with col_b:
+        if st.button("Simulate Post"):
+            p = generate_simulated_post()
+            kw = extract_keywords(p.get("content", "") )
+            ai = analyze_with_ai(p.get("content", "") )
+            save_alert(p, kw, ai, source="simulated")
+            st.toast("Simulated post added", icon="✅")
+            st.rerun()
+    if st.button("Run One Check"):
+        cnt = run_one_check()
+        st.toast(f"Run complete: {cnt} new", icon="✅")
+        st.rerun()
 
 st.markdown("---")
 
 # Metrics Grid
-if alerts:
-    latest = alerts[0]
+view_alerts = [a for a in alerts if (a.get('source', 'real') == 'real' or not only_real)]
+if view_alerts:
+    latest = view_alerts[0]
     high_impact_count = sum(1 for a in alerts if a.get('ai_analysis', {}).get('impact'))
     
     c1, c2, c3, c4 = st.columns(4)
@@ -315,6 +336,14 @@ if alerts:
         """, unsafe_allow_html=True)
 
     st.markdown("<br>", unsafe_allow_html=True)
+    latest_time_str = latest.get('created_at', '')
+    try:
+        ts = datetime.fromisoformat(latest_time_str.replace('Z',''))
+        age_min = int((datetime.utcnow() - ts).total_seconds() / 60)
+        if age_min > 60:
+            st.warning(f"Data age {age_min} min")
+    except Exception:
+        pass
 
     # HERO SECTION (Latest Post)
     latest_ai = latest.get('ai_analysis', {})
@@ -339,6 +368,7 @@ if alerts:
 <span class="tag {'tag-red' if is_high_impact else 'tag-green'}">
 {'🚨 HIGH MARKET IMPACT' if is_high_impact else '✅ LOW IMPACT'}
 </span>
+<span class="tag tag-gray">{'REAL' if latest.get('source','real')=='real' else 'SIMULATED'}</span>
 <span style="color:#64748B; font-size:12px;">{latest.get('created_at', '')[:16].replace('T', ' ')}</span>
 </div>
 <div class="post-content">“{latest['content']}”</div>
@@ -358,7 +388,7 @@ if alerts:
         st.subheader("📜 Recent Posts")
     
     # List Layout
-    for alert in alerts[1:5]: # Show next 4 (Total 5 including Hero)
+    for alert in view_alerts[1:5]:
         ai = alert.get('ai_analysis', {})
         impact = ai.get('impact', False)
         
@@ -371,6 +401,9 @@ if alerts:
             with fc2:
                 # Custom HTML for the card content to ensure tight spacing
                 st.markdown(f"**{alert['content'][:120]}...**")
+                ts = alert.get('created_at', '')
+                ts_disp = ts[:16].replace('T',' ')
+                st.caption(f"🕒 {ts_disp}")
                 
                 # Metadata row
                 assets = ai.get('affected_assets', [])
