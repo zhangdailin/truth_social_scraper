@@ -20,11 +20,11 @@ PROCESSED_LOG_FILE = os.path.join(PROJECT_ROOT, "processed_posts.json")
 ALERTS_FILE = os.path.join(PROJECT_ROOT, "market_alerts.json")
 
 # SiliconFlow API Configuration
-SILICONFLOW_API_KEY = os.getenv("SILICONFLOW_API_KEY") or "sk-vfiiyizfqtxlhsfurukjvjdhhjoujoziniixmskejftkcqfn"
+SILICONFLOW_API_KEY = os.getenv("SILICONFLOW_API_KEY") 
 BASE_URL = "https://api.siliconflow.cn/v1"
 
 # Apify Configuration
-APIFY_TOKEN = os.getenv("APIFY_TOKEN") or "apify_api_6a0tpEjsNdEzIY5lcXGAlcLeC6n2tT3SLBVX"
+APIFY_TOKEN = os.getenv("APIFY_TOKEN") 
 
 # Basic stop words to filter out common noise
 STOP_WORDS = {
