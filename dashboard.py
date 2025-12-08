@@ -225,7 +225,20 @@ def load_alerts():
             def _pick_ts(a):
                 return a.get('created_at') or a.get('createdAt') or a.get('detected_at') or ''
             data.sort(key=lambda x: _parse_ts(_pick_ts(x)), reverse=True)
-            return data
+            def _norm_content(a):
+                c = (a.get('content', '') or '')
+                c = re.sub(r'http\S+', '', c)
+                c = re.sub(r'\s+', ' ', c).strip().lower()
+                return c
+            seen = set()
+            deduped = []
+            for a in data:
+                key = _norm_content(a)
+                if key and key in seen:
+                    continue
+                seen.add(key)
+                deduped.append(a)
+            return deduped
     except Exception:
         return []
 
