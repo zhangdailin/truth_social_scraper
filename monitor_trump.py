@@ -3,14 +3,11 @@ import os
 import json
 import re
 import random
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from apify_client import ApifyClient
 from apify_client.errors import ApifyApiError
 from openai import OpenAI
 from ddgs import DDGS
-import requests
-import xml.etree.ElementTree as ET
-import html
 
 # ==========================================
 # CONFIGURATION
@@ -294,12 +291,12 @@ def save_alert(post, keywords, ai_analysis=None, source=None):
     """
     alert_data = {
         "id": post.get("id"),
-        "created_at": post.get("createdAt") or post.get("created_at") or datetime.now().isoformat(),
+        "created_at": post.get("createdAt") or post.get("created_at") or datetime.now(timezone.utc).isoformat(),
         "content": post.get("content") or post.get("text", ""),
         "url": post.get("url", "https://truthsocial.com/@realDonaldTrump"),
         "keywords": keywords,
         "ai_analysis": ai_analysis,
-        "detected_at": datetime.now().isoformat(),
+        "detected_at": datetime.now(timezone.utc).isoformat(),
         "source": source or ("simulated" if str(post.get("id", "")).startswith("simulated") else "real")
     }
 
@@ -323,69 +320,19 @@ def save_alert(post, keywords, ai_analysis=None, source=None):
     print(f"Alert saved to {ALERTS_FILE}")
 
 def generate_history():
-    """Generates a batch of historical posts for testing/demo purposes."""
-    print("Generating 20 historical posts...")
-    alerts = []
-    
-    # Generate 20 posts
-    # Start from 2 hours ago to avoid conflict with "Just Now" live monitor
-    base_time = datetime.utcnow() - timedelta(hours=2)
-    
-    for i in range(20):
-        template = POST_TEMPLATES[i % len(POST_TEMPLATES)]
-        
-        # Time decreases by ~2 hours for each post
-        post_time = base_time - timedelta(hours=i*2 + random.randint(0, 60)/60)
-        
-        post_id = f"simulated_hist_{int(post_time.timestamp())}"
-        
-        ai_analysis = {
-            "impact": template.get("impact", False),
-            "reasoning": template.get("reasoning", "Standard political statement with limited immediate market relevance."),
-            "affected_assets": template.get("assets", []),
-            "sentiment": template.get("sentiment", "neutral"),
-            "recommendation": template.get("rec", "None"),
-            "external_context_used": "Historical Simulation Data"
-        }
-        
-        alert = {
-            "id": post_id,
-            "created_at": post_time.isoformat() + "Z",
-            "content": template["content"],
-            "url": f"https://truthsocial.com/@realDonaldTrump/{post_id}",
-            "keywords": "simulation history",
-            "ai_analysis": ai_analysis,
-            "detected_at": datetime.now().isoformat(),
-            "source": "simulated"
-        }
-        
-        alerts.append(alert)
-        
-    # Sort: Newest first
-    alerts.sort(key=lambda x: x['created_at'], reverse=True)
-    
-    # Save
-    with open(ALERTS_FILE, "w") as f:
-        json.dump(alerts, f, indent=2, ensure_ascii=False)
-        
-    print(f"✅ Successfully seeded {len(alerts)} historical posts to {ALERTS_FILE}")
+    return 0
 
 def generate_simulated_post():
-    """Generates a fake post for testing/demo purposes when API fails."""
-    # Pick a random template
-    template = random.choice(POST_TEMPLATES)
-    
-    post = {
-        "content": template["content"],
+    return {
+        "content": "",
         "id": f"simulated_{int(time.time())}",
-        "created_at": datetime.utcnow().isoformat() + "Z",
-        "url": f"https://truthsocial.com/@realDonaldTrump/simulated_{int(time.time())}"
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "url": "https://truthsocial.com/@realDonaldTrump"
     }
-    return post
 
 def run_one_check():
     if not APIFY_TOKEN:
-        dataset_items = [generate_simulated_post()]
+        return 0
     else:
         client = ApifyClient(APIFY_TOKEN)
         run_input = {"searchQueries": ["realDonaldTrump"], "resultsLimit": 5, "maxItems": 5}
@@ -397,7 +344,7 @@ def run_one_check():
             else:
                 dataset_items = [generate_simulated_post()]
         except ApifyApiError:
-            dataset_items = [generate_simulated_post()]
+            dataset_items = []
         except Exception:
             dataset_items = []
     processed_ids = load_processed_posts()
@@ -414,35 +361,20 @@ def run_one_check():
     save_processed_posts(processed_ids)
     return new_posts_count
 
-def fetch_rss_posts(limit=5):
-    url = "https://truthsocial.com/@realDonaldTrump.rss"
+def run_fetch_recent(limit=20):
+    if not APIFY_TOKEN:
+        return 0
+    client = ApifyClient(APIFY_TOKEN)
+    run_input = {"searchQueries": ["realDonaldTrump"], "resultsLimit": int(limit), "maxItems": int(limit)}
+    dataset_items = []
     try:
-        resp = requests.get(url, timeout=10)
-        if resp.status_code != 200:
-            return []
-        root = ET.fromstring(resp.text)
-        channel = root.find('channel')
-        items = channel.findall('item') if channel is not None else []
-        posts = []
-        for it in items[:limit]:
-            link = (it.findtext('link') or '').strip()
-            title = (it.findtext('title') or '').strip()
-            desc = (it.findtext('description') or '').strip()
-            pub = (it.findtext('pubDate') or '').strip()
-            content = html.unescape(desc or title)
-            pid = link.split('/')[-1] if link else f"rss_{int(time.time())}"
-            posts.append({
-                "id": pid,
-                "created_at": pub,
-                "content": content,
-                "url": link
-            })
-        return posts
+        run = client.actor("muhammetakkurtt/truth-social-scraper").call(run_input=run_input)
+        if run:
+            dataset_items = client.dataset(run["defaultDatasetId"]).iterate_items()
+    except ApifyApiError:
+        dataset_items = []
     except Exception:
-        return []
-
-def run_one_check_free():
-    dataset_items = fetch_rss_posts(limit=5)
+        dataset_items = []
     processed_ids = load_processed_posts()
     new_posts_count = 0
     for post in dataset_items:
@@ -456,92 +388,25 @@ def run_one_check_free():
             processed_ids.add(post_id)
     save_processed_posts(processed_ids)
     return new_posts_count
-def run_monitoring_loop():
-    if not APIFY_TOKEN:
-        print("Error: APIFY_TOKEN not found.")
-        return
 
-    client = ApifyClient(APIFY_TOKEN)
-    processed_ids = load_processed_posts()
-    
-    print(f"Starting monitoring... Loaded {len(processed_ids)} processed posts.")
-    print("Press Ctrl+C to stop.")
-
+def purge_simulated_alerts():
+    if not os.path.exists(ALERTS_FILE):
+        return 0
     try:
-        while True:
-            print(f"\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] Checking for new posts...")
-            
-            # Run the scraper - fetching only recent posts to save credits/time
-            run_input = {
-                "searchQueries": ["realDonaldTrump"],
-                "resultsLimit": 5, # Try to limit to 5
-                "maxItems": 5,     # Enforce limit of 5
-            }
-            
-            dataset_items = []
-            
-            try:
-                # Start the actor
-                run = client.actor("muhammetakkurtt/truth-social-scraper").call(run_input=run_input)
-                
-                if run:
-                    dataset_items = client.dataset(run["defaultDatasetId"]).iterate_items()
-                else:
-                    print("Scraper run failed (no run returned).")
+        with open(ALERTS_FILE, "r") as f:
+            data = json.load(f)
+        filtered = [a for a in data if str(a.get("source", "real")) != "simulated"]
+        removed = len(data) - len(filtered)
+        with open(ALERTS_FILE, "w") as f:
+            json.dump(filtered, f, indent=2, ensure_ascii=False)
+        return removed
+    except Exception:
+        return 0
 
-            except ApifyApiError as e:
-                print(f"⚠️ Apify API Error: {e}")
-                print("⚠️ Switching to SIMULATION MODE for this check to demonstrate functionality.")
-                dataset_items = [generate_simulated_post()]
-                
-            except Exception as e:
-                print(f"⚠️ Unexpected Scraper Error: {e}")
-                print("⚠️ Retrying in 5 minutes...")
-                time.sleep(300)
-                continue
-
-            # Iterate results (Real or Simulated)
-            new_posts_count = 0
-            
-            for post in dataset_items:
-                post_id = post.get("id")
-                
-                # If we haven't seen this post yet
-                if post_id and post_id not in processed_ids:
-                    new_posts_count += 1
-                    content = post.get("content") or post.get("text", "")
-                    
-                    print(f"New post found: {post_id}")
-                    
-                    # Extract keywords
-                    keywords = extract_keywords(content)
-
-                    # Always Analyze with AI
-                    print("🤖 Requesting DeepSeek Analysis for new post...")
-                    ai_result = analyze_with_ai(content)
-                    
-                    if ai_result.get("impact"):
-                        print(f"✅ AI Confirmed Impact: {ai_result.get('reasoning')}")
-                    else:
-                        print(f"ℹ️ AI says no major impact.")
-
-                    save_alert(post, keywords, ai_result, source="real")
-
-                    processed_ids.add(post_id)
-            
-            # Save updated list of processed IDs
-            save_processed_posts(processed_ids)
-            
-            # Wait for next check
-            time.sleep(10 * 60) # 10 minutes
-
-    except KeyboardInterrupt:
-        print("\nMonitoring stopped by user.")
+def run_one_check_free():
+    return 0
+def run_monitoring_loop():
+    return
 
 if __name__ == "__main__":
-    # Check if we should seed history (if alerts file is missing or empty)
-    if not os.path.exists(ALERTS_FILE) or os.path.getsize(ALERTS_FILE) < 100:
-        print("Initializing historical data...")
-        generate_history()
-
-    run_monitoring_loop()
+    pass

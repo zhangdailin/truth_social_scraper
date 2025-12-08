@@ -3,6 +3,7 @@ import json
 import time
 import os
 import pandas as pd
+import re
 from datetime import datetime, timezone
 
 # ==========================================
@@ -20,11 +21,8 @@ st.set_page_config(
 # ==========================================
 st.markdown("""
 <style>
-    /* Global Font */
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600&family=JetBrains+Mono:wght@400;700&display=swap');
-    
     html, body, [class*="css"] {
-        font-family: 'Inter', sans-serif;
+        font-family: system-ui, -apple-system, "Segoe UI", Roboto, Ubuntu, Cantarell, "Noto Sans", Helvetica, Arial, sans-serif;
     }
     
     /* Reduce top padding to minimize empty space */
@@ -41,7 +39,6 @@ st.markdown("""
     }
     
     h1, h2, h3 {
-        font-family: 'Inter', sans-serif;
         font-weight: 600;
         color: #1E293B;
     }
@@ -194,19 +191,23 @@ def get_chart_image_html(symbol):
     return f"""<div style="background-color: white; padding: 4px;"><div style="font-size: 10px; color: #64748B; margin-bottom: 4px; text-align: left;">📊 {symbol} Daily Trend</div><img src="{image_url}" class="tooltip-image" alt="{symbol} Chart" onerror="this.style.display='none'; this.parentElement.innerHTML='Chart unavailable';"/></div>"""
 
 def inject_stock_tooltips(text, assets):
-    """
-    Replaces stock symbols in text with hoverable tooltips containing charts.
-    """
-    if not assets:
+    if not text or not assets:
         return text
-        
-    for asset in assets:
-        # Use simple replace for now. For robust matching use regex with word boundaries.
-        if asset in text:
-            tooltip_html = f"""<span class="stock-tooltip">{asset}<div class="tooltip-content">{get_chart_image_html(asset)}</div><div class="tooltip-arrow"></div></span>"""
-            text = text.replace(asset, tooltip_html)
-            
-    return text
+    uniq = []
+    seen = set()
+    for a in assets:
+        s = str(a).strip().upper()
+        if s and s not in seen:
+            seen.add(s)
+            uniq.append(s)
+    if not uniq:
+        return text
+    uniq.sort(key=len, reverse=True)
+    pattern = r"\b(" + "|".join(map(re.escape, uniq)) + r")\b"
+    def _repl(m):
+        sym = m.group(1)
+        return f"<span class=\"stock-tooltip\">{sym}<div class=\"tooltip-content\">{get_chart_image_html(sym)}</div><div class=\"tooltip-arrow\"></div></span>"
+    return re.sub(pattern, _repl, text, flags=re.IGNORECASE)
 
 def load_alerts():
     if not os.path.exists(ALERTS_FILE):
@@ -216,10 +217,14 @@ def load_alerts():
             data = json.load(f)
             def _parse_ts(s):
                 try:
-                    return datetime.fromisoformat((s or '').replace('Z',''))
+                    s2 = (s or '').replace('Z', '+00:00')
+                    dt = datetime.fromisoformat(s2)
+                    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
                 except Exception:
-                    return datetime.min
-            data.sort(key=lambda x: _parse_ts(x.get('detected_at') or x.get('created_at') or ''), reverse=True)
+                    return datetime.min.replace(tzinfo=timezone.utc)
+            def _pick_ts(a):
+                return a.get('created_at') or a.get('createdAt') or a.get('detected_at') or ''
+            data.sort(key=lambda x: _parse_ts(_pick_ts(x)), reverse=True)
             return data
     except Exception:
         return []
@@ -232,24 +237,33 @@ def to_local_str(iso_str):
         s = iso_str.replace('Z', '+00:00')
         dt = datetime.fromisoformat(s)
         if dt.tzinfo is None:
-            local_tz = datetime.now().astimezone().tzinfo
-            dt = dt.replace(tzinfo=local_tz)
+            dt = dt.replace(tzinfo=timezone.utc)
         return dt.astimezone().strftime('%Y-%m-%d %H:%M')
     except Exception:
         return (iso_str or '')[:16].replace('T', ' ')
 
+def pick_ts_str(alert):
+    return alert.get('created_at') or alert.get('createdAt') or alert.get('detected_at') or ''
+
 alerts = load_alerts()
+try:
+    from monitor_trump import purge_simulated_alerts
+    removed = purge_simulated_alerts()
+    if removed:
+        alerts = load_alerts()
+except Exception:
+    pass
 if not alerts:
     try:
-        from monitor_trump import generate_history
-        generate_history()
+        from monitor_trump import run_fetch_recent
+        run_fetch_recent(limit=20)
         alerts = load_alerts()
     except Exception:
         alerts = []
 
 if 'last_api_check' not in st.session_state:
     st.session_state['last_api_check'] = time.time()
-if time.time() - float(st.session_state['last_api_check']) >= 300:
+if time.time() - float(st.session_state['last_api_check']) >= float(st.session_state.get('check_interval_seconds', 900)):
     try:
         from monitor_trump import run_one_check
         run_one_check()
@@ -293,6 +307,8 @@ with c_header:
 with c_control:
     st.markdown("**⚙️ System Control**")
     refresh_rate = st.slider("Auto-refresh (sec)", 5, 60, 10)
+    fetch_interval_min = st.slider("Fetch interval (min)", 5, 120, 30)
+    st.session_state['check_interval_seconds'] = int(fetch_interval_min * 60)
     st.success(f"● Online | {datetime.now().strftime('%H:%M:%S')}")
 
 st.markdown("---")
@@ -339,7 +355,7 @@ if alerts:
         """, unsafe_allow_html=True)
 
     st.markdown("<br>", unsafe_allow_html=True)
-    latest_time_str = latest.get('created_at', '')
+    latest_time_str = pick_ts_str(latest)
     try:
         ts = datetime.fromisoformat(latest_time_str.replace('Z','+00:00'))
         if ts.tzinfo is None:
@@ -377,7 +393,7 @@ if alerts:
 {'🚨 HIGH MARKET IMPACT' if is_high_impact else '✅ LOW IMPACT'}
 </span>
 <span class="tag tag-gray">{'REAL' if latest.get('source','real')=='real' else 'SIMULATED'}</span>
-<span style="color:#64748B; font-size:12px;">{to_local_str(latest.get('created_at', ''))}</span>
+<span style="color:#64748B; font-size:12px;">{to_local_str(pick_ts_str(latest))}</span>
 </div>
 <div class="post-content">“{latest.get('content','')}”</div>
 {rec_html}
@@ -398,48 +414,38 @@ if alerts:
     # List Layout
     for alert in alerts[1:6]:
         ai = alert.get('ai_analysis', {})
-        impact = ai.get('impact', False)
-        
-        with st.container():
-            # Use Streamlit's native columns for layout within the list item
-            fc1, fc2 = st.columns([0.03, 0.97])
-            with fc1:
-                st.markdown(f"{'🔴' if impact else '🟢'}")
-            
-            with fc2:
-                # Custom HTML for the card content to ensure tight spacing
-                st.markdown(f"**{alert.get('content','')[:120]}...**")
-                ts_disp = to_local_str(alert.get('created_at', ''))
-                st.caption(f"🕒 {ts_disp}")
-                
-                # Metadata row
-                assets = ai.get('affected_assets', [])
-                assets_str = ", ".join(assets) if assets else "None"
-                
-                st.caption(f"Reasoning: {ai.get('reasoning', 'N/A')}")
-                
-                # Show recommendation in feed as well if exists
-                rec = ai.get('recommendation', 'None')
-                if rec and rec != "None":
-                    # Inject tooltips here too
-                    try:
-                        rec_with_tooltips = inject_stock_tooltips(rec, assets)
-                    except Exception:
-                        rec_with_tooltips = rec
-                    st.markdown(f"<div style='margin-bottom: 4px;'><strong>💰 Rec:</strong> <span style='color: #F97316;'>{rec_with_tooltips}</span></div>", unsafe_allow_html=True)
+        is_high = ai.get('impact', False)
+        impact_class = "hero-alert-high" if is_high else "hero-alert-low"
+        ts_disp = to_local_str(pick_ts_str(alert))
+        rec = ai.get('recommendation', 'None')
+        assets = ai.get('affected_assets', [])
+        rec_html = ""
+        if rec and rec != "None":
+            try:
+                rec_with_tooltips = inject_stock_tooltips(rec, assets)
+            except Exception:
+                rec_with_tooltips = rec
+            rec_html = f"""<div style=\"margin-top:12px; padding:12px; background-color:#FEF3C7; border-left:4px solid #F59E0B; border-radius:4px;\">
+<strong style=\"color:#B45309;\">💰 Trading Recommendation:</strong>
+<span style=\"color:#92400E; font-weight:600;\">{rec_with_tooltips}</span>
+</div>"""
 
-                if 'external_context_used' in ai:
-                     context_text = ai['external_context_used'].replace('News Context:', '').strip()
-                     st.caption(f"🔍 Context: {context_text}")
-                
-                if assets:
-                    st.markdown(f"<span class='tag tag-gray'>Assets: {assets_str}</span>", unsafe_allow_html=True)
-                
-                with st.expander("View Details"):
-                    st.write(alert.get('content',''))
-                    st.link_button("Original Post", alert.get('url','https://truthsocial.com/@realDonaldTrump'))
-            
-            st.divider()
+        st.markdown(f"""<div class=\"hero-card {impact_class}\">
+<div style=\"display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;\">
+<span class=\"tag {'tag-red' if is_high else 'tag-green'}\">{'🚨 HIGH MARKET IMPACT' if is_high else '✅ LOW IMPACT'}</span>
+<span class=\"tag tag-gray\">{'REAL' if alert.get('source','real')=='real' else 'SIMULATED'}</span>
+<span style=\"color:#64748B; font-size:12px;\">{ts_disp}</span>
+</div>
+<div class=\"post-content\">“{alert.get('content','')}”</div>
+{rec_html}
+<div style=\"margin-top:16px; padding-top:16px; border-top:1px solid #E2E8F0;\">
+<div style=\"font-weight:600; font-size:14px; color:#475569; margin-bottom:4px;\">🤖 AI Analyst Notes:</div>
+<div style=\"color:#334155; font-size:14px; margin-bottom:8px;\">{ai.get('reasoning', 'Analysis pending...')}</div>
+<div style=\"font-size:12px; color:#64748B; background-color:#F8FAFC; padding:8px; border-radius:4px; border:1px solid #E2E8F0;\">\n<strong>🔍 Context Checked:</strong> {(ai.get('external_context_used','No external context data available.')).replace('News Context:', '').strip()}\n</div>
+</div>
+</div>""", unsafe_allow_html=True)
+
+        st.divider()
 
     # Historical Data
     if len(alerts) > 5:
@@ -449,7 +455,7 @@ if alerts:
             st.dataframe(
                 pd.DataFrame([
                     {
-                        "Date": to_local_str(a.get('created_at', '')),
+                        "Date": to_local_str(pick_ts_str(a)),
                         "Content": a.get('content',''),
                         "Impact": "High" if a.get('ai_analysis', {}).get('impact') else "Low",
                         "Sentiment": a.get('ai_analysis', {}).get('sentiment', '-'),
