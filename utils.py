@@ -208,6 +208,7 @@ def fetch_json_with_retries(
 
     # Optional concurrent probe to reorder by success
     preprobed = False
+    probe_target = probe_url or os.getenv("PROBE_URL") or url
     if probe_first and probe_concurrency > 1:
         preprobed = True
         successes = []
@@ -225,7 +226,7 @@ def fetch_json_with_retries(
                     print(f"[proxy] skip unsupported handler: {label}")
                 return False, label
             try:
-                req = Request(probe_url or url, headers=headers)
+                req = Request(probe_target, headers=headers)
                 with opener.open(req, timeout=min(timeout, probe_timeout)) as resp:
                     resp.read(128)
                 return True, label
@@ -274,7 +275,7 @@ def fetch_json_with_retries(
         # Optional quick probe using the same headers (includes cookie)
         if probe_first and not preprobed:
             try:
-                req = Request(probe_url or url, headers=headers)
+                req = Request(probe_target, headers=headers)
                 with opener.open(req, timeout=min(timeout, probe_timeout)) as resp:
                     resp.read(128)
                 if verbose_proxy:
@@ -390,7 +391,7 @@ def fetch_with_cookie_via_proxies(
         proxy_backoff=proxy_backoff,
         probe_first=True,
         probe_timeout=probe_timeout,
-        probe_url=url,
+        probe_url=os.getenv("PROBE_URL"),
         probe_concurrency=probe_concurrency,
     )
 
