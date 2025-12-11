@@ -356,13 +356,17 @@ def pick_ts_str(alert):
     return alert.get('created_at') or alert.get('createdAt') or alert.get('detected_at') or ''
 
 alerts = load_alerts()
-if not alerts:
-    with st.spinner("Fetching initial posts (first run)..."):
-        try:
-            from monitor_trump import run_fetch_recent
-            run_fetch_recent(limit=20)
-        except Exception:
-            pass
+if 'initial_fetch_done' not in st.session_state:
+    st.session_state['initial_fetch_done'] = False
+if not alerts and not st.session_state['initial_fetch_done']:
+    try:
+        from monitor_trump import run_fetch_recent
+        cnt = run_fetch_recent(limit=10, fast_init=True, allow_proxy=False)
+        if not int(cnt or 0):
+            cnt = 0
+    except Exception:
+        cnt = 0
+    st.session_state['initial_fetch_done'] = True
     alerts = load_alerts()
 
 if 'last_api_check' not in st.session_state:

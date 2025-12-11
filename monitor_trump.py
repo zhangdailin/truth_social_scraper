@@ -5,7 +5,7 @@ import re
 from datetime import datetime, timedelta, timezone
 from openai import OpenAI
 from ddgs import DDGS
-from urllib.request import Request, urlopen
+from urllib.request import Request, urlopen, ProxyHandler, build_opener
 import socket
 import ssl
 from urllib.parse import urlsplit
@@ -29,8 +29,9 @@ BASE_URL = "https://api.siliconflow.cn/v1"
 HUGGINGFACE_API_KEY = os.getenv("HUGGINGFACE_API_KEY")
 HUGGINGFACE_IMAGE_MODEL = os.getenv("HUGGINGFACE_IMAGE_MODEL", "Salesforce/blip-image-captioning-large")
 HF_API_URL = "https://api-inference.huggingface.co/models"
-USE_SOCKS5_PROXY = True
 SOCKS5_COUNTRY = "US"
+PROXY_POOL_TTL = 300
+PROXY_POOL = {"healthy": [], "last_refresh": 0}
 
 # Apify Configuration
 TRUTH_ACCOUNT_ID = os.getenv("TRUTH_ACCOUNT_ID", "107780257626128497")
@@ -366,6 +367,85 @@ def http_get_via_socks5(url, headers, proxy, timeout=20):
         pass
     return json.loads(body)
 
+def fetch_json_via_http_proxy(url, headers, proxy_url, timeout=15):
+    ph = ProxyHandler({"http": proxy_url, "https": proxy_url})
+    op = build_opener(ph)
+    req = Request(url, headers=headers)
+    with op.open(req, timeout=timeout) as resp:
+        body = resp.read()
+        return json.loads(body)
+
+def http_proxy_check_country(proxy_url, expect=SOCKS5_COUNTRY, timeout=5):
+    try:
+        ph = ProxyHandler({"http": proxy_url, "https": proxy_url})
+        op = build_opener(ph)
+        req = Request("http://ip-api.com/json/?fields=status,countryCode", headers={"User-Agent":"Mozilla/5.0"})
+        with op.open(req, timeout=timeout) as resp:
+            data = json.loads(resp.read())
+        cc = str(data.get("countryCode") or "").upper()
+        ok = str(data.get("status") or "") == "success" and cc == expect
+        if ok:
+            return True
+    except Exception:
+        pass
+    try:
+        ph = ProxyHandler({"http": proxy_url, "https": proxy_url})
+        op = build_opener(ph)
+        req = Request("https://ipinfo.io/json", headers={"User-Agent":"Mozilla/5.0"})
+        with op.open(req, timeout=timeout) as resp:
+            data = json.loads(resp.read())
+        cc = str(data.get("country") or "").upper()
+        return cc == expect
+    except Exception:
+        return False
+
+def fetch_public_http(limit=20):
+    srcs = [
+        "https://www.proxy-list.download/api/v1/get?type=http",
+        "https://api.proxyscrape.com/?request=displayproxies&proxytype=http&timeout=2000&country=all&ssl=all&anonymity=all",
+    ]
+    items = []
+    for s in srcs:
+        try:
+            with urlopen(Request(s, headers={"User-Agent":"Mozilla/5.0"}), timeout=10) as r:
+                body = r.read().decode("utf-8", errors="ignore")
+            for line in body.splitlines():
+                p = line.strip()
+                if p and ":" in p:
+                    items.append(p)
+        except Exception:
+            continue
+    out = []
+    seen = set()
+    for p in items:
+        if p not in seen:
+            seen.add(p)
+            out.append(p)
+    return out[:int(limit)]
+
+def fetch_public_https(limit=20):
+    srcs = [
+        "https://www.proxy-list.download/api/v1/get?type=https",
+    ]
+    items = []
+    for s in srcs:
+        try:
+            with urlopen(Request(s, headers={"User-Agent":"Mozilla/5.0"}), timeout=10) as r:
+                body = r.read().decode("utf-8", errors="ignore")
+            for line in body.splitlines():
+                p = line.strip()
+                if p and ":" in p:
+                    items.append(p)
+        except Exception:
+            continue
+    out = []
+    seen = set()
+    for p in items:
+        if p not in seen:
+            seen.add(p)
+            out.append(p)
+    return out[:int(limit)]
+
 def socks5_check_country(proxy, expect=SOCKS5_COUNTRY, timeout=4):
     try:
         data = http_get_via_socks5("http://ip-api.com/json/?fields=status,countryCode", {"User-Agent":"Mozilla/5.0"}, proxy, timeout=timeout)
@@ -409,6 +489,88 @@ def race_fetch_json_via_socks5(url, headers, proxies, timeout=16):
     def attempt(px):
         try:
             data = http_get_via_socks5(url, headers, proxy=px, timeout=timeout)
+            if isinstance(data, list) and not res[0]:
+                res[0] = data
+        except Exception:
+            pass
+    max_workers = min(len(proxies), 16) or 1
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        futs = [ex.submit(attempt, p) for p in proxies]
+        for _ in as_completed(futs):
+            if res[0]:
+                break
+    return res[0]
+
+def get_candidate_http(limit=6):
+    cand = fetch_public_http(limit=limit*5)
+    want = int(limit)
+    out = []
+    max_workers = min(len(cand), 24) or 1
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        futs = {ex.submit(http_proxy_check_country, f"http://{p}", SOCKS5_COUNTRY): p for p in cand}
+        for fut in as_completed(futs):
+            p = futs[fut]
+            ok = False
+            try:
+                ok = bool(fut.result())
+            except Exception:
+                ok = False
+            if ok:
+                out.append(f"http://{p}")
+                if len(out) >= want:
+                    break
+    return out
+
+def get_candidate_https(limit=6):
+    cand = fetch_public_https(limit=limit*5)
+    want = int(limit)
+    out = []
+    max_workers = min(len(cand), 24) or 1
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        futs = {ex.submit(http_proxy_check_country, f"http://{p}", SOCKS5_COUNTRY): p for p in cand}
+        for fut in as_completed(futs):
+            p = futs[fut]
+            ok = False
+            try:
+                ok = bool(fut.result())
+            except Exception:
+                ok = False
+            if ok:
+                out.append(f"http://{p}")
+                if len(out) >= want:
+                    break
+    return out
+
+def refresh_proxy_pool():
+    now = int(time.time())
+    if (now - int(PROXY_POOL.get("last_refresh") or 0)) < int(PROXY_POOL_TTL) and PROXY_POOL.get("healthy"):
+        return
+    http_list = get_candidate_http(limit=6)
+    https_list = get_candidate_https(limit=6)
+    socks_list = get_candidate_socks5(limit=6)
+    healthy = []
+    for px in http_list:
+        healthy.append({"type": "http", "addr": px})
+    for px in https_list:
+        healthy.append({"type": "https", "addr": px})
+    for px in socks_list:
+        healthy.append({"type": "socks5", "addr": px})
+    PROXY_POOL["healthy"] = healthy
+    PROXY_POOL["last_refresh"] = now
+
+def race_fetch_json_via_pool(url, headers, timeout=16):
+    if not PROXY_POOL.get("healthy"):
+        refresh_proxy_pool()
+    proxies = list(PROXY_POOL.get("healthy") or [])
+    if not proxies:
+        return None
+    res = [None]
+    def attempt(p):
+        try:
+            if p["type"] in ("http", "https"):
+                data = fetch_json_via_http_proxy(url, headers, p["addr"], timeout=timeout)
+            else:
+                data = http_get_via_socks5(url, headers, proxy=p["addr"], timeout=timeout)
             if isinstance(data, list) and not res[0]:
                 res[0] = data
         except Exception:
@@ -530,7 +692,7 @@ def generate_simulated_post():
     }
 
 
-def run_fetch_recent(limit=20):
+def run_fetch_recent(limit=20, fast_init=False, allow_proxy=True):
     if TRUTH_COOKIE and TRUTH_ACCOUNT_ID and str(TRUTH_ACCOUNT_ID).isdigit():
         try:
             url = f"https://truthsocial.com/api/v1/accounts/{TRUTH_ACCOUNT_ID}/statuses?exclude_replies=true&with_muted=true&limit={int(limit)}"
@@ -544,20 +706,31 @@ def run_fetch_recent(limit=20):
             }
             print(f"CookieAPI request: {url}")
             try:
-                items = fetch_json_with_retries(url, headers, timeout=15, retries=2, backoff=2)
+                items = fetch_json_with_retries(
+                    url,
+                    headers,
+                    timeout=(8 if fast_init else 15),
+                    retries=(1 if fast_init else 2),
+                    backoff=(1 if fast_init else 2)
+                )
             except Exception as e:
                 print(f"CookieAPI primary failed: {e}")
                 try:
                     url2 = f"https://truthsocial.com/api/v1/accounts/{TRUTH_ACCOUNT_ID}/statuses?exclude_replies=true&with_muted=true&limit={min(5, int(limit))}"
                     print(f"CookieAPI retry request: {url2}")
-                    items = fetch_json_with_retries(url2, headers, timeout=25, retries=2, backoff=3)
+                    items = fetch_json_with_retries(
+                        url2,
+                        headers,
+                        timeout=(12 if fast_init else 25),
+                        retries=(1 if fast_init else 2),
+                        backoff=(2 if fast_init else 3)
+                    )
                 except Exception as e2:
                     print(f"CookieAPI fallback failed: {e2}")
-                    if USE_SOCKS5_PROXY:
+                    if allow_proxy:
                         try:
-                            proxies = get_candidate_socks5(limit=8)
-                            print(f"CookieAPI proxy candidates: {len(proxies)}")
-                            items = race_fetch_json_via_socks5(url, headers, proxies, timeout=16)
+                            refresh_proxy_pool()
+                            items = race_fetch_json_via_pool(url, headers, timeout=(10 if fast_init else 16))
                             if not isinstance(items, list):
                                 return 0
                         except Exception as pe2:
