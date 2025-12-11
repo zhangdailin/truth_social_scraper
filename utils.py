@@ -6,15 +6,93 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from urllib.parse import urlparse
-from urllib.request import Request, urlopen, build_opener, ProxyHandler
+from urllib.request import Request, urlopen, build_opener, ProxyHandler, BaseHandler
+from urllib.error import URLError
 
 try:
-    # Provided by PySocks; enables urllib to talk to socks proxies
-    from sockshandler import SocksiPyHandler  # type: ignore
     import socks  # type: ignore
-except Exception:  # noqa: BLE001
-    SocksiPyHandler = None
+    _SOCKS_AVAILABLE = True
+except ImportError:
     socks = None
+    _SOCKS_AVAILABLE = False
+
+
+class SocksiPyHandler(BaseHandler):
+    """Custom SOCKS proxy handler for urllib using PySocks."""
+    
+    def __init__(self, proxy_type, host, port, username=None, password=None):
+        if not _SOCKS_AVAILABLE:
+            raise ImportError("PySocks is required for SOCKS proxy support")
+        self.proxy_type = proxy_type
+        self.host = host
+        self.port = port
+        self.username = username
+        self.password = password
+    
+    def http_open(self, req):
+        return self._proxy_open(req, False)
+    
+    def https_open(self, req):
+        return self._proxy_open(req, True)
+    
+    def _proxy_open(self, req, is_https):
+        import socket as std_socket
+        from http.client import HTTPConnection, HTTPSConnection
+        from io import BytesIO
+        
+        # Parse the target URL
+        url = req.full_url
+        parsed = urlparse(url)
+        target_host = parsed.hostname
+        target_port = parsed.port or (443 if is_https else 80)
+        
+        # Create a SOCKS socket factory function
+        def create_socks_connection(host, port, timeout=None, source_address=None):
+            """Create a connection function that uses SOCKS proxy."""
+            sock = socks.socksocket()
+            sock.set_proxy(
+                self.proxy_type,
+                self.host,
+                self.port,
+                username=self.username if self.username else None,
+                password=self.password if self.password else None,
+            )
+            if timeout is not None:
+                sock.settimeout(timeout)
+            sock.connect((host, port))
+            return sock
+        
+        # Temporarily monkey-patch socket.create_connection
+        original_create_connection = std_socket.create_connection
+        std_socket.create_connection = create_socks_connection
+        
+        try:
+            # Use http.client to make the request
+            timeout = req.timeout or 30
+            if is_https:
+                conn = HTTPSConnection(target_host, target_port, timeout=timeout)
+            else:
+                conn = HTTPConnection(target_host, target_port, timeout=timeout)
+            
+            # Build the path with query string
+            path = parsed.path or "/"
+            if parsed.query:
+                path += "?" + parsed.query
+            
+            # Send request
+            conn.request(req.get_method(), path, body=req.data, headers=dict(req.headers))
+            resp = conn.getresponse()
+            
+            # Create a file-like object for the response
+            response_data = resp.read()
+            resp_file = BytesIO(response_data)
+            
+            # Create urllib response
+            from urllib.response import addinfourl
+            return addinfourl(resp_file, resp.msg, req.full_url, resp.status)
+        finally:
+            # Restore original create_connection
+            std_socket.create_connection = original_create_connection
 
 # Paths shared across scripts
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -121,29 +199,48 @@ def derive_content(post, media_atts):
     return describe_media(media_atts)
 
 
-def fetch_public_proxies(protocol="socks5", max_items=5):
+def fetch_public_proxies(max_items=5):
     """
-    Fetch a small list of public proxies from GitHub.
-    Default source: TheSpeedX/PROXY-List raw files.
+    Fetch a small list of public proxies from proxifly/free-proxy-list.
+    Automatically detects protocol types (socks5, socks4, http) from the proxy URLs.
+    
+    Args:
+        max_items: Maximum number of proxies to return
     """
-    sources = {
-        "socks5": "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt",
-        "socks4": "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks4.txt",
-        "http": "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt",
-    }
-    src = sources.get(protocol, sources["http"])
-    try:
-        with urlopen(src, timeout=8) as resp:
-            body = resp.read().decode("utf-8", errors="ignore")
-    except Exception:
-        return []
-
+    sources = [
+        "https://raw.githubusercontent.com/proxifly/free-proxy-list/refs/heads/main/proxies/countries/US/data.txt",
+        "https://raw.githubusercontent.com/proxifly/free-proxy-list/refs/heads/main/proxies/countries/PL/data.txt",
+        "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt",
+        "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks4.txt",
+    ]
+    
     proxies = []
-    for line in body.splitlines():
-        line = line.strip()
-        if not line or ":" not in line:
+    for src in sources:
+        try:
+            with urlopen(src, timeout=8) as resp:
+                body = resp.read().decode("utf-8", errors="ignore")
+        except Exception:
             continue
-        proxies.append(f"{protocol}://{line}")
+        
+        for line in body.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            # Check if line already contains protocol prefix (socks5://, socks4://, http://)
+            if "://" in line:
+                # Already has protocol, check if it's HTTP and skip it
+                parsed = urlparse(line)
+                scheme = (parsed.scheme or "").lower()
+                # Skip HTTP proxies, only keep SOCKS and HTTPS
+                if scheme == "http":
+                    continue
+                # Keep SOCKS (socks4, socks4a, socks5, socks5h) and HTTPS
+                proxies.append(line)
+            elif ":" in line:
+                # No protocol prefix, skip it (would be HTTP by default)
+                # Only add proxies that explicitly specify a non-HTTP protocol
+                continue
+    
     # Dedup and shuffle so we do not keep testing the same top-of-file entries
     proxies = list(dict.fromkeys(proxies))
     random.shuffle(proxies)
@@ -170,8 +267,7 @@ def fetch_json_with_retries(
     last_err = None
     proxy_candidates = []
     if use_free_proxies:
-        proxy_candidates.extend(fetch_public_proxies("socks5", max_items=proxy_limit))
-        proxy_candidates.extend(fetch_public_proxies("http", max_items=max(1, proxy_limit - 1)))
+        proxy_candidates.extend(fetch_public_proxies(max_items=proxy_limit))
     # Always allow direct connection as last fallback
     proxy_candidates.append(None)
 
@@ -182,29 +278,60 @@ def fetch_json_with_retries(
         parsed = urlparse(proxy_url)
         scheme = (parsed.scheme or "").lower()
         if scheme in {"socks5", "socks5h", "socks4", "socks4a"}:
-            if not (SocksiPyHandler and socks):
-                # Missing PySocks handler, skip this proxy
+            if not _SOCKS_AVAILABLE:
+                # Missing PySocks library, skip this proxy
+                if verbose_proxy:
+                    print(f"[proxy] PySocks not available, skip: {proxy_url}")
                 return None
-            proxy_type = (
-                socks.PROXY_TYPE_SOCKS5
-                if "5" in scheme
-                else socks.PROXY_TYPE_SOCKS4
-            )
-            host = parsed.hostname
-            port = parsed.port or 1080
-            username = parsed.username
-            password = parsed.password
-            handler = SocksiPyHandler(
-                proxy_type,
-                host,
-                port,
-                username=username,
-                password=password,
-            )
-            return build_opener(handler)
+            try:
+                # Determine proxy type: socks5/socks5h use SOCKS5, socks4/socks4a use SOCKS4
+                is_socks5 = "5" in scheme
+                proxy_type = (
+                    socks.PROXY_TYPE_SOCKS5
+                    if is_socks5
+                    else socks.PROXY_TYPE_SOCKS4
+                )
+                host = parsed.hostname
+                port = parsed.port or 1080
+                if not host:
+                    # Invalid proxy URL (no hostname)
+                    if verbose_proxy:
+                        print(f"[proxy] invalid proxy URL (no hostname): {proxy_url}")
+                    return None
+                # SOCKS4 does not support authentication, only SOCKS5 does
+                username = parsed.username if is_socks5 else None
+                password = parsed.password if is_socks5 else None
+                handler = SocksiPyHandler(
+                    proxy_type,
+                    host,
+                    port,
+                    username=username,
+                    password=password,
+                )
+                opener = build_opener(handler)
+                if verbose_proxy:
+                    print(f"[proxy] created SOCKS handler: {proxy_url} (type={proxy_type}, host={host}, port={port})")
+                return opener
+            except Exception as e:
+                # If handler creation fails, return None to skip this proxy
+                if verbose_proxy:
+                    print(f"[proxy] failed to create handler for {proxy_url}: {type(e).__name__}: {e}")
+                import traceback
+                if verbose_proxy:
+                    traceback.print_exc()
+                return None
         # http/https proxies
-        cfg = {"http": proxy_url, "https": proxy_url}
-        return build_opener(ProxyHandler(cfg))
+        try:
+            cfg = {"http": proxy_url, "https": proxy_url}
+            opener = build_opener(ProxyHandler(cfg))
+            if verbose_proxy:
+                print(f"[proxy] created HTTP/HTTPS handler: {proxy_url}")
+            return opener
+        except Exception as e:
+            # If handler creation fails, return None to skip this proxy
+            if verbose_proxy:
+                print(f"[proxy] failed to create handler for {proxy_url}: {type(e).__name__}: {e}")
+            return None
 
     # Optional concurrent probe to reorder by success
     preprobed = False
