@@ -20,12 +20,13 @@ pip install -r requirements.txt
 ```
 2. 配置必要环境变量（至少需要其一）
 ```
-# Apify（推荐作为主数据源）
-$env:APIFY_TOKEN="你的Apify令牌"
+# Cookie 抓取 Truth Social
+$env:TRUTH_COOKIE="你的Truth Social Cookie"
+$env:TRUTH_ACCOUNT_ID="107780257626128497"  # 默认 realDonaldTrump
+$env:TRUTH_USERNAME="realDonaldTrump"
 
 # SiliconFlow（用于 AI 分析 DeepSeek-V3）
 $env:SILICONFLOW_API_KEY="你的SiliconFlow密钥"
-
 ```
 3. 运行仪表盘
 ```
@@ -41,9 +42,9 @@ streamlit run dashboard.py
 - 底部档案区：以表格展开更旧的推文记录
 
 ## 数据来源与抓取逻辑
-- Apify：
-  - `monitor_trump.py:356-383` 使用 Apify Truth Social Scraper 抓取
-  - 需设置环境变量 `APIFY_TOKEN`
+- Truth Social Cookie API：
+  - 使用 `monitor_trump.py` 中的 `fetch_truth_posts` 直接访问 Truth Social 公开接口
+  - 需提供有效的 `TRUTH_COOKIE`，账号 ID/用户名可保持默认 `realDonaldTrump`
 - 首次加载与定时抓取：
   - 页面初次无数据时尝试拉取最近数据 `run_fetch_recent`
   - 后续按 `Fetch interval (min)` 定时调用 `run_one_check`
@@ -62,7 +63,7 @@ streamlit run dashboard.py
 ## 文件结构（关键）
 - `dashboard.py`: Streamlit 仪表盘主界面与渲染逻辑
 - `monitor_trump.py`: 数据抓取、AI 分析与告警写入
-- `requirements.txt`: 依赖列表（Streamlit、Pandas、Apify Client、OpenAI、DDGS）
+- `requirements.txt`: 依赖列表（Streamlit、Pandas、OpenAI）
 - `market_alerts.json`: 告警数据文件
 - `processed_posts.json`: 已处理的帖子 ID 集合
 
@@ -71,7 +72,7 @@ streamlit run dashboard.py
 ## 常见问题
 - “Data age XXX min” 提示：表示最新推文本身距离当前的分钟数，并非抓取延迟。
 - 没有新数据：
-  - 检查 `APIFY_TOKEN` 是否有效
+  - 检查 `TRUTH_COOKIE` 是否有效
   - 网络环境是否可达数据源接口
   - `Fetch interval (min)` 是否配置过大
 

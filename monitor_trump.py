@@ -1,44 +1,43 @@
-import time
 import os
 import json
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from openai import OpenAI
-from ddgs import DDGS
-from urllib.request import Request, urlopen, ProxyHandler, build_opener
-import socket
-import ssl
-from urllib.parse import urlsplit
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from urllib.request import Request, urlopen
+from utils import (
+    ALERTS_FILE,
+    PROJECT_ROOT,
+    derive_content,
+    env_flag,
+    extract_media,
+    fetch_truth_posts,
+    normalize_iso,
+)
 
 # ==========================================
 # CONFIGURATION
 # ==========================================
-# Determine paths relative to this script to ensure consistency
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-PROJECT_ROOT = os.path.dirname(SCRIPT_DIR) # Go up one level to 'L'
-
+# Determine paths relative to repo root
 PROCESSED_LOG_FILE = os.path.join(PROJECT_ROOT, "processed_posts.json")
-ALERTS_FILE = os.path.join(PROJECT_ROOT, "market_alerts.json")
 
 # SiliconFlow API Configuration
-SILICONFLOW_API_KEY = os.getenv("SILICONFLOW_API_KEY") 
+SILICONFLOW_API_KEY = os.getenv("SILICONFLOW_API_KEY")
 BASE_URL = "https://api.siliconflow.cn/v1"
  
 
 HUGGINGFACE_API_KEY = os.getenv("HUGGINGFACE_API_KEY")
 HUGGINGFACE_IMAGE_MODEL = os.getenv("HUGGINGFACE_IMAGE_MODEL", "Salesforce/blip-image-captioning-large")
 HF_API_URL = "https://api-inference.huggingface.co/models"
-SOCKS5_COUNTRY = "US"
-PROXY_POOL_TTL = 300
-PROXY_POOL = {"healthy": [], "last_refresh": 0}
 
-# Apify Configuration
+# Truth Social configuration (cookie-based)
 TRUTH_ACCOUNT_ID = os.getenv("TRUTH_ACCOUNT_ID", "107780257626128497")
 TRUTH_COOKIE = os.getenv("TRUTH_COOKIE", "")
 TRUTH_USERNAME = os.getenv("TRUTH_USERNAME", "realDonaldTrump")
 
- 
+# Feature toggles
+ENABLE_AI_ANALYSIS = env_flag("ENABLE_AI_ANALYSIS", True)
+ENABLE_REMOTE_FETCH = env_flag("ENABLE_REMOTE_FETCH", True)
+
 
 # Basic stop words to filter out common noise
 STOP_WORDS = {
@@ -81,34 +80,13 @@ def extract_keywords(text):
 
 def fetch_external_context(query_text):
     """
-    Fetches external context (news/search results) using DuckDuckGo.
-    Uses extracted keywords to find relevant market news and discussions.
+    External context lookup via DuckDuckGo was removed; the feature is currently
+    disabled. We still surface extracted keywords for transparency.
     """
-    try:
-        keywords = extract_keywords(query_text)
-        if not keywords:
-            keywords = query_text[:50]
-        q_news = re.sub(r"\s+", " ", f"Donald Trump {keywords} market news").strip()
-        q_market = re.sub(r"\s+", " ", f"Donald Trump {keywords} stock market reaction").strip()
-        q_news = re.sub(r"[\)\:]+$", "", q_news)
-        q_market = re.sub(r"[\)\:]+$", "", q_market)
-        results = []
-        with DDGS() as ddgs:
-            try:
-                news_gen = ddgs.news(q_news, max_results=2)
-                if news_gen:
-                    results.extend([f"[News] {r['title']}: {r['body']}" for r in news_gen])
-            except Exception:
-                pass
-            try:
-                web_gen = ddgs.text(q_market, max_results=2)
-                if web_gen:
-                    results.extend([f"[Market Discussion] {r['title']}: {r['body']}" for r in web_gen])
-            except Exception:
-                pass
-        return "\n".join(results) if results else "No related external news found."
-    except Exception:
-        return "No related external news found."
+    keywords = extract_keywords(query_text)
+    if not keywords:
+        keywords = query_text[:50]
+    return f"External news lookup disabled. Extracted keywords: {keywords}"
 
 def hf_caption_image(image_url, timeout=15):
     try:
@@ -164,6 +142,16 @@ def analyze_with_ai(post_content, media=None):
     Analyzes the post content using DeepSeek model via SiliconFlow API.
     Returns a dictionary with analysis results.
     """
+    if not ENABLE_AI_ANALYSIS:
+        return {
+            "impact": False,
+            "summary": "AI Analysis disabled via ENABLE_AI_ANALYSIS flag.",
+            "recommendation": "None",
+            "sentiment": "neutral",
+            "affected_assets": [],
+            "external_context_used": "Analysis disabled",
+        }
+
     if not SILICONFLOW_API_KEY:
         return {
             "error": "Missing SILICONFLOW_API_KEY environment variable.",
@@ -286,302 +274,16 @@ def analyze_with_ai(post_content, media=None):
 # MONITORING FUNCTIONS
 # ==========================================
 
-def fetch_json_with_retries(url, headers, timeout=15, retries=3, backoff=2):
-    last_err = None
-    for i in range(int(retries)):
-        try:
-            req = Request(url, headers=headers)
-            with urlopen(req, timeout=timeout) as resp:
-                body = resp.read()
-                return json.loads(body)
-        except Exception as e:
-            last_err = e
-            time.sleep(backoff * (i + 1))
-    raise last_err
-
-def fetch_public_socks5(limit=12):
-    items = []
-    srcs = [
-        "https://www.proxy-list.download/api/v1/get?type=socks5",
-        "https://api.proxyscrape.com/v2/?request=getproxies&protocol=socks5&timeout=2000&country=all&simplified=true",
-    ]
-    for s in srcs:
-        try:
-            with urlopen(Request(s, headers={"User-Agent":"Mozilla/5.0"}), timeout=10) as r:
-                body = r.read().decode("utf-8", errors="ignore")
-            for line in body.splitlines():
-                p = line.strip()
-                if p and ":" in p:
-                    items.append(p)
-        except Exception:
-            continue
-    out = []
-    seen = set()
-    for p in items:
-        if p not in seen:
-            seen.add(p)
-            out.append(p)
-    return out[:int(limit)]
-
-def socks5_connect(proxy, host, port, timeout=12, use_ssl=False):
-    ph, pp = proxy.split(":")
-    pp = int(pp)
-    s = socket.create_connection((ph, pp), timeout=timeout)
-    s.sendall(b"\x05\x01\x00")
-    msel = s.recv(2)
-    dest = host.encode("utf-8")
-    req = b"\x05\x01\x00\x03" + bytes([len(dest)]) + dest + port.to_bytes(2, "big")
-    s.sendall(req)
-    resp = s.recv(10)
-    if use_ssl:
-        ctx = ssl.create_default_context()
-        s = ctx.wrap_socket(s, server_hostname=host)
-    return s
-
-def http_get_via_socks5(url, headers, proxy, timeout=20):
-    u = urlsplit(url)
-    host = u.hostname
-    port = u.port or (443 if u.scheme == "https" else 80)
-    path = u.path or "/"
-    if u.query:
-        path = path + "?" + u.query
-    use_ssl = u.scheme == "https"
-    s = socks5_connect(proxy, host, port, timeout=timeout, use_ssl=use_ssl)
-    req = f"GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n" + "\r\n".join([f"{k}: {v}" for k,v in headers.items()]) + "\r\n\r\n"
-    s.sendall(req.encode("utf-8"))
-    chunks = []
-    while True:
-        data = s.recv(4096)
-        if not data:
-            break
-        chunks.append(data)
-    s.close()
-    raw = b"".join(chunks)
-    sep = raw.find(b"\r\n\r\n")
-    body = raw[sep+4:] if sep != -1 else raw
+def _alerts_file_empty():
+    """Check whether the alerts store has any records."""
     try:
-        txt = body.decode("utf-8")
-        if txt.startswith("0\r\n") or "\r\n" in txt.splitlines()[0]:
-            pass
+        if os.path.exists(ALERTS_FILE):
+            with open(ALERTS_FILE, "r") as f:
+                arr = json.load(f)
+                return not bool(arr)
     except Exception:
         pass
-    return json.loads(body)
-
-def fetch_json_via_http_proxy(url, headers, proxy_url, timeout=15):
-    ph = ProxyHandler({"http": proxy_url, "https": proxy_url})
-    op = build_opener(ph)
-    req = Request(url, headers=headers)
-    with op.open(req, timeout=timeout) as resp:
-        body = resp.read()
-        return json.loads(body)
-
-def http_proxy_check_country(proxy_url, expect=SOCKS5_COUNTRY, timeout=5):
-    try:
-        ph = ProxyHandler({"http": proxy_url, "https": proxy_url})
-        op = build_opener(ph)
-        req = Request("http://ip-api.com/json/?fields=status,countryCode", headers={"User-Agent":"Mozilla/5.0"})
-        with op.open(req, timeout=timeout) as resp:
-            data = json.loads(resp.read())
-        cc = str(data.get("countryCode") or "").upper()
-        ok = str(data.get("status") or "") == "success" and cc == expect
-        if ok:
-            return True
-    except Exception:
-        pass
-    try:
-        ph = ProxyHandler({"http": proxy_url, "https": proxy_url})
-        op = build_opener(ph)
-        req = Request("https://ipinfo.io/json", headers={"User-Agent":"Mozilla/5.0"})
-        with op.open(req, timeout=timeout) as resp:
-            data = json.loads(resp.read())
-        cc = str(data.get("country") or "").upper()
-        return cc == expect
-    except Exception:
-        return False
-
-def fetch_public_http(limit=20):
-    srcs = [
-        "https://www.proxy-list.download/api/v1/get?type=http",
-        "https://api.proxyscrape.com/?request=displayproxies&proxytype=http&timeout=2000&country=all&ssl=all&anonymity=all",
-    ]
-    items = []
-    for s in srcs:
-        try:
-            with urlopen(Request(s, headers={"User-Agent":"Mozilla/5.0"}), timeout=10) as r:
-                body = r.read().decode("utf-8", errors="ignore")
-            for line in body.splitlines():
-                p = line.strip()
-                if p and ":" in p:
-                    items.append(p)
-        except Exception:
-            continue
-    out = []
-    seen = set()
-    for p in items:
-        if p not in seen:
-            seen.add(p)
-            out.append(p)
-    return out[:int(limit)]
-
-def fetch_public_https(limit=20):
-    srcs = [
-        "https://www.proxy-list.download/api/v1/get?type=https",
-    ]
-    items = []
-    for s in srcs:
-        try:
-            with urlopen(Request(s, headers={"User-Agent":"Mozilla/5.0"}), timeout=10) as r:
-                body = r.read().decode("utf-8", errors="ignore")
-            for line in body.splitlines():
-                p = line.strip()
-                if p and ":" in p:
-                    items.append(p)
-        except Exception:
-            continue
-    out = []
-    seen = set()
-    for p in items:
-        if p not in seen:
-            seen.add(p)
-            out.append(p)
-    return out[:int(limit)]
-
-def socks5_check_country(proxy, expect=SOCKS5_COUNTRY, timeout=4):
-    try:
-        data = http_get_via_socks5("http://ip-api.com/json/?fields=status,countryCode", {"User-Agent":"Mozilla/5.0"}, proxy, timeout=timeout)
-        cc = str(data.get("countryCode") or "").upper()
-        ok = str(data.get("status") or "") == "success" and cc == expect
-        if ok:
-            return True
-    except Exception:
-        pass
-    try:
-        data = http_get_via_socks5("https://ipinfo.io/json", {"User-Agent":"Mozilla/5.0"}, proxy, timeout=timeout)
-        cc = str(data.get("country") or "").upper()
-        return cc == expect
-    except Exception:
-        return False
-
-def get_candidate_socks5(limit=6):
-    cand = fetch_public_socks5(limit=limit*10)
-    want = int(limit)
-    out = []
-    max_workers = min(len(cand), 32) or 1
-    with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        futs = {ex.submit(socks5_check_country, p, SOCKS5_COUNTRY): p for p in cand}
-        for fut in as_completed(futs):
-            p = futs[fut]
-            ok = False
-            try:
-                ok = bool(fut.result())
-            except Exception:
-                ok = False
-            if ok:
-                out.append(p)
-                if len(out) >= want:
-                    break
-    return out
-
-def race_fetch_json_via_socks5(url, headers, proxies, timeout=16):
-    if not proxies:
-        return None
-    res = [None]
-    def attempt(px):
-        try:
-            data = http_get_via_socks5(url, headers, proxy=px, timeout=timeout)
-            if isinstance(data, list) and not res[0]:
-                res[0] = data
-        except Exception:
-            pass
-    max_workers = min(len(proxies), 16) or 1
-    with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        futs = [ex.submit(attempt, p) for p in proxies]
-        for _ in as_completed(futs):
-            if res[0]:
-                break
-    return res[0]
-
-def get_candidate_http(limit=6):
-    cand = fetch_public_http(limit=limit*5)
-    want = int(limit)
-    out = []
-    max_workers = min(len(cand), 24) or 1
-    with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        futs = {ex.submit(http_proxy_check_country, f"http://{p}", SOCKS5_COUNTRY): p for p in cand}
-        for fut in as_completed(futs):
-            p = futs[fut]
-            ok = False
-            try:
-                ok = bool(fut.result())
-            except Exception:
-                ok = False
-            if ok:
-                out.append(f"http://{p}")
-                if len(out) >= want:
-                    break
-    return out
-
-def get_candidate_https(limit=6):
-    cand = fetch_public_https(limit=limit*5)
-    want = int(limit)
-    out = []
-    max_workers = min(len(cand), 24) or 1
-    with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        futs = {ex.submit(http_proxy_check_country, f"http://{p}", SOCKS5_COUNTRY): p for p in cand}
-        for fut in as_completed(futs):
-            p = futs[fut]
-            ok = False
-            try:
-                ok = bool(fut.result())
-            except Exception:
-                ok = False
-            if ok:
-                out.append(f"http://{p}")
-                if len(out) >= want:
-                    break
-    return out
-
-def refresh_proxy_pool():
-    now = int(time.time())
-    if (now - int(PROXY_POOL.get("last_refresh") or 0)) < int(PROXY_POOL_TTL) and PROXY_POOL.get("healthy"):
-        return
-    http_list = get_candidate_http(limit=6)
-    https_list = get_candidate_https(limit=6)
-    socks_list = get_candidate_socks5(limit=6)
-    healthy = []
-    for px in http_list:
-        healthy.append({"type": "http", "addr": px})
-    for px in https_list:
-        healthy.append({"type": "https", "addr": px})
-    for px in socks_list:
-        healthy.append({"type": "socks5", "addr": px})
-    PROXY_POOL["healthy"] = healthy
-    PROXY_POOL["last_refresh"] = now
-
-def race_fetch_json_via_pool(url, headers, timeout=16):
-    if not PROXY_POOL.get("healthy"):
-        refresh_proxy_pool()
-    proxies = list(PROXY_POOL.get("healthy") or [])
-    if not proxies:
-        return None
-    res = [None]
-    def attempt(p):
-        try:
-            if p["type"] in ("http", "https"):
-                data = fetch_json_via_http_proxy(url, headers, p["addr"], timeout=timeout)
-            else:
-                data = http_get_via_socks5(url, headers, proxy=p["addr"], timeout=timeout)
-            if isinstance(data, list) and not res[0]:
-                res[0] = data
-        except Exception:
-            pass
-    max_workers = min(len(proxies), 16) or 1
-    with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        futs = [ex.submit(attempt, p) for p in proxies]
-        for _ in as_completed(futs):
-            if res[0]:
-                break
-    return res[0]
+    return True
 
 def load_processed_posts():
     """
@@ -617,38 +319,8 @@ def save_alert(post, keywords, ai_analysis=None, source=None):
         created_iso = datetime.now(timezone.utc).isoformat()
 
     atts = post.get("media_attachments") or post.get("media") or []
-    media = []
-    try:
-        for m in atts:
-            mt = str(m.get("type", "")).lower()
-            mu = m.get("url") or m.get("remote_url") or m.get("preview_url")
-            if mu and (not mt or mt in ("image", "gifv", "video")):
-                media.append({
-                    "url": mu,
-                    "preview_url": m.get("preview_url") or mu,
-                    "description": m.get("description") or "",
-                    "type": mt or "image"
-                })
-    except Exception:
-        media = []
-
-    _content = post.get("content") or post.get("text", "") or ""
-    if (not str(_content).strip()) and media:
-        try:
-            _descs = [d.get("description") for d in media if str(d.get("description", "")).strip()]
-            if _descs:
-                _content = " ".join(_descs)
-            else:
-                vc = sum(1 for x in media if (x.get("type") or "").lower() in ("video", "gifv"))
-                ic = len(media) - vc
-                if vc > 0:
-                    _content = f"[视频] {vc} 个"
-                else:
-                    _content = f"[图片] {ic} 张"
-        except Exception:
-            vc = sum(1 for x in media if (x.get("type") or "").lower() in ("video", "gifv"))
-            ic = len(media) - vc
-            _content = f"[视频] {vc} 个" if vc > 0 else f"[图片] {ic} 张"
+    media = extract_media(atts)
+    _content = derive_content(post, atts)
 
     alert_data = {
         "id": post.get("id"),
@@ -681,110 +353,57 @@ def save_alert(post, keywords, ai_analysis=None, source=None):
     
     print(f"Alert saved to {ALERTS_FILE}")
 
- 
+def run_fetch_recent(limit=20, fast_init=False):
+    if not ENABLE_REMOTE_FETCH:
+        print("Remote fetch disabled via ENABLE_REMOTE_FETCH flag.")
+        return 0
+    if not (TRUTH_COOKIE and TRUTH_ACCOUNT_ID and str(TRUTH_ACCOUNT_ID).isdigit()):
+        return 0
 
-def generate_simulated_post():
-    return {
-        "content": "",
-        "id": f"simulated_{int(time.time())}",
-        "created_at": datetime.now(timezone.utc).isoformat(),
-        "url": "https://truthsocial.com/@realDonaldTrump"
-    }
+    items = fetch_truth_posts(
+        TRUTH_ACCOUNT_ID,
+        TRUTH_USERNAME,
+        TRUTH_COOKIE,
+        limit=limit,
+        fast_init=fast_init,
+    )
+    print(f"CookieAPI fetched items: {len(items) if isinstance(items, list) else 0}")
+    
+    processed_ids = load_processed_posts()
+    alerts_empty = _alerts_file_empty()
+    new_posts_count = 0
+    print(f"CookieAPI alerts_empty={alerts_empty} processed_ids={len(processed_ids)}")
 
+    for post in items or []:
+        post_id = str(post.get("id") or "").strip()
+        media_atts = post.get("media_attachments", [])
+        media = extract_media(media_atts)
+        content = derive_content(post, media_atts)
+        keywords = extract_keywords(content)
+        ai_result = analyze_with_ai(content, media=media_atts)
+        created_iso = normalize_iso(post.get("created_at"))
+        url = post.get("url") or "https://truthsocial.com/@realDonaldTrump"
 
-def run_fetch_recent(limit=20, fast_init=False, allow_proxy=True):
-    if TRUTH_COOKIE and TRUTH_ACCOUNT_ID and str(TRUTH_ACCOUNT_ID).isdigit():
-        try:
-            url = f"https://truthsocial.com/api/v1/accounts/{TRUTH_ACCOUNT_ID}/statuses?exclude_replies=true&with_muted=true&limit={int(limit)}"
-            headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
-                "Accept": "application/json, text/plain, */*",
-                "Accept-Language": "en-US,en;q=0.9",
-                "Origin": "https://truthsocial.com",
-                "Referer": f"https://truthsocial.com/@{TRUTH_USERNAME}",
-                "Cookie": TRUTH_COOKIE,
-            }
-            print(f"CookieAPI request: {url}")
-            try:
-                items = fetch_json_with_retries(
-                    url,
-                    headers,
-                    timeout=(8 if fast_init else 15),
-                    retries=(1 if fast_init else 2),
-                    backoff=(1 if fast_init else 2)
-                )
-            except Exception as e:
-                print(f"CookieAPI primary failed: {e}")
-                try:
-                    url2 = f"https://truthsocial.com/api/v1/accounts/{TRUTH_ACCOUNT_ID}/statuses?exclude_replies=true&with_muted=true&limit={min(5, int(limit))}"
-                    print(f"CookieAPI retry request: {url2}")
-                    items = fetch_json_with_retries(
-                        url2,
-                        headers,
-                        timeout=(12 if fast_init else 25),
-                        retries=(1 if fast_init else 2),
-                        backoff=(2 if fast_init else 3)
-                    )
-                except Exception as e2:
-                    print(f"CookieAPI fallback failed: {e2}")
-                    if allow_proxy:
-                        try:
-                            refresh_proxy_pool()
-                            items = race_fetch_json_via_pool(url, headers, timeout=(10 if fast_init else 16))
-                            if not isinstance(items, list):
-                                return 0
-                        except Exception as pe2:
-                            print(f"Proxy pipeline error: {pe2}")
-                            return 0
-                    else:
-                        return 0
-            print(f"CookieAPI fetched items: {len(items) if isinstance(items, list) else 0}")
-            processed_ids = load_processed_posts()
-            new_posts_count = 0
-            alerts_empty = True
-            try:
-                if os.path.exists(ALERTS_FILE):
-                    with open(ALERTS_FILE, "r") as f:
-                        arr = json.load(f)
-                        alerts_empty = not bool(arr)
-            except Exception:
-                alerts_empty = True
-            print(f"CookieAPI alerts_empty={alerts_empty} processed_ids={len(processed_ids)}")
-            for post in items or []:
-                post_id = str(post.get("id") or "").strip()
-                content_html = post.get("content") or ""
-                content = re.sub(r"<[^>]+>", " ", content_html)
-                content = re.sub(r"\s+", " ", content).strip()
-                media_atts = post.get("media_attachments", [])
-                if not content and media_atts:
-                    try:
-                        descs = [str(m.get("description") or "").strip() for m in media_atts if str(m.get("description") or "").strip()]
-                        if descs:
-                            content = " ".join(descs)
-                        else:
-                            content = f"[图片] {len(media_atts)} 张"
-                    except Exception:
-                        content = f"[图片] {len(media_atts)} 张"
-                keywords = extract_keywords(content)
-                ai_result = analyze_with_ai(content, media=media_atts)
-                created_iso = post.get("created_at") or datetime.now(timezone.utc).isoformat()
-                url = post.get("url") or "https://truthsocial.com/@realDonaldTrump"
-                if alerts_empty:
-                    save_alert({"id": post_id or f"api_{int(time.time())}", "content": content, "created_at": created_iso, "url": url, "media_attachments": media_atts}, keywords, ai_result, source="real")
-                    if post_id:
-                        processed_ids.add(post_id)
-                    new_posts_count += 1
-                else:
-                    if post_id and post_id not in processed_ids:
-                        save_alert({"id": post_id, "content": content, "created_at": created_iso, "url": url, "media_attachments": media_atts}, keywords, ai_result, source="real")
-                        processed_ids.add(post_id)
-                        new_posts_count += 1
-            save_processed_posts(processed_ids)
-            print(f"CookieAPI wrote alerts: {new_posts_count}")
-            return new_posts_count
-        except Exception as e:
-            print(f"CookieAPI error: {e}")
-    return 0
+        if alerts_empty or (post_id and post_id not in processed_ids):
+            save_alert(
+                {
+                    "id": post_id or f"api_{int(datetime.now(timezone.utc).timestamp())}",
+                    "content": content,
+                    "created_at": created_iso,
+                    "url": url,
+                    "media_attachments": media_atts
+                },
+                keywords,
+                ai_result,
+                source="real"
+            )
+            if post_id:
+                processed_ids.add(post_id)
+            new_posts_count += 1
+
+    save_processed_posts(processed_ids)
+    print(f"CookieAPI wrote alerts: {new_posts_count}")
+    return new_posts_count
 
 def purge_simulated_alerts():
     if not os.path.exists(ALERTS_FILE):

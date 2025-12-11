@@ -5,6 +5,7 @@ import os
 import pandas as pd
 import re
 from datetime import datetime, timezone
+from utils import ALERTS_FILE, describe_media, local_tz_label, pick_ts, to_local_str
 
 # ==========================================
 # 1. PAGE CONFIGURATION
@@ -120,6 +121,53 @@ st.markdown("""
     .tag-green { background-color: #ECFDF5; color: #059669; border: 1px solid #A7F3D0; }
     .tag-gray { background-color: #F1F5F9; color: #475569; border: 1px solid #E2E8F0; }
 
+    /* Media grid */
+    .media-grid {
+        margin-top: 12px;
+        display: grid;
+        gap: 10px;
+        grid-template-columns: repeat(auto-fit, minmax(var(--media-min, 180px), 1fr));
+    }
+    .media-item {
+        position: relative;
+        overflow: hidden;
+        border-radius: 10px;
+        border: 1px solid #E2E8F0;
+        background: #0F172A;
+        min-height: 140px;
+    }
+    .media-item img,
+    .media-item video {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+        display: block;
+        background: #0F172A;
+    }
+    .media-item video {
+        aspect-ratio: 16 / 9;
+    }
+    .media-item img {
+        aspect-ratio: 4 / 3;
+    }
+    .media-more {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: #1E293B;
+        background: linear-gradient(135deg, #E2E8F0, #CBD5E1);
+        font-weight: 700;
+        font-size: 18px;
+        gap: 6px;
+    }
+    .media-more span {
+        font-size: 12px;
+        color: #475569;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+    }
+
     /* Stock Tooltip */
     .stock-tooltip {
         position: relative;
@@ -206,9 +254,6 @@ document.addEventListener('DOMContentLoaded', function(){
 # ==========================================
 # 3. DATA LOADING
 # ==========================================
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
-ALERTS_FILE = os.path.join(PROJECT_ROOT, "market_alerts.json")
 
 # Base64 encoded alarm sound (short beep)
 ALARM_AUDIO_BASE64 = "data:audio/mpeg;base64,/+MYxAAEaAIEeUAQAgBgNgP/////KQQ/////Lvrg+lcWYHgtjadzsbTq+yREu495tq9c6v/7vt/of7mna9v6/btUnU17Jun9/+MYxCkT26KW+YGBAj9v6vUh+zab//v/96C3/pu6H+pv//r/ycIIP4pcWWTRBBBAMXgNdbRaABQAAABRWKwgjQVX0ECmrb///+MYxBQSM0sWWYI4A++Z/////////////0rOZ3MP//7H44QEgxgdvRVMXHZseL//540B4JAvMPEgaA4/0nHjxLhRgAoAYAgA/+MYxAYIAAJfGYEQAMAJAIAQMAwX936/q/tWtv/2f/+v//6v/+7qTEFNRTMuOTkuNVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV"
@@ -246,33 +291,49 @@ def inject_stock_tooltips(text, assets):
     return re.sub(pattern, _repl, text, flags=re.IGNORECASE)
 
 def build_media_html(media, max_images=4, width=220):
+    """Render media (images/videos) in a responsive grid with fallbacks."""
     try:
         if not media:
             return ""
-        imgs = []
-        cnt = 0
+
+        items = []
+        max_images = int(max_images)
+        min_col = max(140, int(width))
+
+        video_onerror = 'onerror="this.closest(\'.media-item\').style.display=\'none\';"'
+        img_onerror = video_onerror
+
         for m in media:
-            if cnt >= int(max_images):
+            if len(items) >= max_images:
                 break
             t = (m.get("type") or "").lower()
             vsrc = m.get("url") or m.get("remote_url") or ""
             poster = m.get("preview_url") or ""
             is_video = t in ("video", "gifv") or (vsrc and (".mp4" in vsrc or "video" in vsrc))
+
             if is_video and vsrc:
-                vw = int(width * 2)
-                attrs = f'style="max-width:{vw}px; border-radius:8px; border:1px solid #E2E8F0;" playsinline controls preload="metadata"'
+                video_attrs = 'playsinline controls preload="metadata" controlsList="nodownload"'
                 if poster:
-                    attrs += f' poster="{poster}"'
-                imgs.append(f'<video src="{vsrc}" {attrs} onerror="this.style.display=\'none\';"></video>')
+                    video_attrs += f' poster="{poster}"'
+                items.append(f'<div class="media-item"><video src="{vsrc}" {video_attrs} {video_onerror}></video></div>')
             else:
                 src = poster or m.get("url") or ""
                 if not src:
                     continue
-                imgs.append(f'<img src="{src}" alt="" style="max-width:{int(width)}px; border-radius:8px; border:1px solid #E2E8F0;" onerror="this.style.display=\'none\';" />')
-            cnt += 1
-        if not imgs:
+                items.append(
+                    '<div class="media-item">'
+                    f'<img src="{src}" alt="" loading="lazy" decoding="async" {img_onerror} />'
+                    '</div>'
+                )
+
+        if not items:
             return ""
-        return '<div style="margin-top:12px; display:flex; gap:8px; flex-wrap:wrap;">' + ''.join(imgs) + '</div>'
+
+        remaining = max(0, len(media) - max_images)
+        if remaining:
+            items.append(f'<div class="media-item media-more">+{remaining} <span>more</span></div>')
+
+        return f'<div class="media-grid" style="--media-min:{min_col}px;">' + ''.join(items) + '</div>'
     except Exception:
         return ""
 
@@ -282,25 +343,61 @@ def display_text(item):
         if c:
             return c
         arr = item.get('media') or []
-        _descs = [str(m.get('description') or '').strip() for m in arr if str(m.get('description') or '').strip()]
-        if _descs:
-            return ' '.join(_descs)
-        if arr:
-            vc = sum(1 for x in arr if (x.get('type') or '').lower() in ('video','gifv'))
-            ic = len(arr) - vc
-            return f"[视频] {vc} 个" if vc>0 else f"[图片] {ic} 张"
-        return ''
+        return describe_media(arr)
     except Exception:
         return item.get('content','')
 
-def build_time_html(iso_str):
+def render_recommendation(ai_analysis):
+    rec = ai_analysis.get('recommendation', 'None')
+    if not rec or rec == "None":
+        return ""
+    assets = ai_analysis.get('affected_assets', [])
     try:
-        if not iso_str:
-            return ""
-        s = iso_str.replace('Z', '+00:00')
-        return f'<span class="ts" data-iso="{s}"></span>'
+        rec_with_tooltips = inject_stock_tooltips(rec, assets)
     except Exception:
-        return f'<span class="ts" data-iso="{iso_str}"></span>'
+        rec_with_tooltips = rec
+    return f"""<div style="margin-top:12px; padding:12px; background-color:#FEF3C7; border-left:4px solid #F59E0B; border-radius:4px;">
+<strong style="color:#B45309;">💰 Trading Recommendation:</strong> 
+<span style="color:#92400E; font-weight:600;">{rec_with_tooltips}</span>
+</div>"""
+
+
+def metric_card(label, value, color=None):
+    """Lightweight metric card HTML to avoid repeated multiline snippets."""
+    color_style = f' style="color: {color}"' if color else ""
+    return (
+        '<div class="metric-container">'
+        f'<div class="metric-label">{label}</div>'
+        f'<div class="metric-value"{color_style}>{value}</div>'
+        "</div>"
+    )
+
+def render_alert_card(alert, latest=False):
+    ai = alert.get('ai_analysis', {})
+    is_high = ai.get('impact', False)
+    impact_class = "hero-alert-high" if is_high else "hero-alert-low"
+    impact_label = '🚨 HIGH MARKET IMPACT' if is_high else '✅ LOW IMPACT'
+    tz_lbl = local_tz_label()
+    ts_disp = to_local_str(pick_ts(alert))
+    media_html = build_media_html(alert.get('media'), 4 if latest else 3, 220 if latest else 180)
+    rec_html = render_recommendation(ai)
+    return f"""<div class="hero-card {impact_class}">
+<div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+<span class="tag {'tag-red' if is_high else 'tag-green'}">{impact_label}</span>
+<span class="tag tag-gray">{'REAL' if alert.get('source','real')=='real' else 'SIMULATED'}</span>
+<span style="color:#64748B; font-size:12px;">{ts_disp} ({tz_lbl})</span>
+</div>
+<div class="post-content">“{display_text(alert)}”</div>
+{media_html}
+{rec_html}
+<div style="margin-top:16px; padding-top:16px; border-top:1px solid #E2E8F0;">
+<div style="font-weight:600; font-size:14px; color:#475569; margin-bottom:4px;">🤖 AI Analyst Notes:</div>
+<div style="color:#334155; font-size:14px; margin-bottom:8px;">{ai.get('reasoning', 'Analysis pending...')}</div>
+<div style="font-size:12px; color:#64748B; background-color:#F8FAFC; padding:8px; border-radius:4px; border:1px solid #E2E8F0;">
+<strong>🔍 Context Checked:</strong> {(ai.get('external_context_used','No external context data available.')).replace('News Context:', '').strip()}
+</div>
+</div>
+</div>"""
 
 def load_alerts():
     if not os.path.exists(ALERTS_FILE):
@@ -315,9 +412,7 @@ def load_alerts():
                     return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
                 except Exception:
                     return datetime.min.replace(tzinfo=timezone.utc)
-            def _pick_ts(a):
-                return a.get('created_at') or a.get('createdAt') or a.get('detected_at') or ''
-            data.sort(key=lambda x: _parse_ts(_pick_ts(x)), reverse=True)
+            data.sort(key=lambda x: _parse_ts(pick_ts(x)), reverse=True)
             def _norm_content(a):
                 c = (a.get('content', '') or '')
                 c = re.sub(r'http\S+', '', c)
@@ -335,33 +430,13 @@ def load_alerts():
     except Exception:
         return []
 
-# Helper: convert ISO timestamp to local browser-like timezone string
-def to_local_str(iso_str):
-    try:
-        if not iso_str:
-            return ""
-        s = iso_str.replace('Z', '+00:00')
-        dt = datetime.fromisoformat(s)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        return dt.astimezone().strftime('%Y-%m-%d %H:%M')
-    except Exception:
-        return (iso_str or '')[:16].replace('T', ' ')
-
-def local_tz_label():
-    _now_local = datetime.now(timezone.utc).astimezone()
-    return _now_local.strftime('UTC%z')
-
-def pick_ts_str(alert):
-    return alert.get('created_at') or alert.get('createdAt') or alert.get('detected_at') or ''
-
 alerts = load_alerts()
 if 'initial_fetch_done' not in st.session_state:
     st.session_state['initial_fetch_done'] = False
 if not alerts and not st.session_state['initial_fetch_done']:
     try:
         from monitor_trump import run_fetch_recent
-        cnt = run_fetch_recent(limit=10, fast_init=True, allow_proxy=False)
+        cnt = run_fetch_recent(limit=10, fast_init=True)
         if not int(cnt or 0):
             cnt = 0
     except Exception:
@@ -430,92 +505,35 @@ if alerts_vis:
     high_impact_count = sum(1 for a in alerts if a.get('ai_analysis', {}).get('impact'))
     
     c1, c2, c3, c4 = st.columns(4)
-    
-    with c1:
-        st.markdown(f"""
-        <div class="metric-container">
-            <div class="metric-label">Monitored Posts</div>
-            <div class="metric-value">{len(alerts)}</div>
-        </div>
-        """, unsafe_allow_html=True)
-        
-    with c2:
-        st.markdown(f"""
-        <div class="metric-container">
-            <div class="metric-label">High Impact Alerts</div>
-            <div class="metric-value" style="color: {'#EF4444' if high_impact_count > 0 else '#0F172A'}">{high_impact_count}</div>
-        </div>
-        """, unsafe_allow_html=True)
-        
-    with c3:
-        sentiment = latest.get('ai_analysis', {}).get('sentiment', 'N/A').upper()
-        color = "#10B981" if sentiment == "POSITIVE" else "#EF4444" if sentiment == "NEGATIVE" else "#64748B"
-        st.markdown(f"""
-        <div class="metric-container">
-            <div class="metric-label">Latest Sentiment</div>
-            <div class="metric-value" style="color: {color}">{sentiment}</div>
-        </div>
-        """, unsafe_allow_html=True)
-        
-    with c4:
-        try:
-            _lts = pick_ts_str(latest)
-            _ts = datetime.fromisoformat(_lts.replace('Z','+00:00'))
-            if _ts.tzinfo is None:
-                _ts = _ts.replace(tzinfo=timezone.utc)
-            _age_min2 = int((datetime.now(timezone.utc) - _ts.astimezone(timezone.utc)).total_seconds() / 60)
-        except Exception:
-            _age_min2 = 0
-        st.markdown(f"""
-        <div class="metric-container">
-            <div class="metric-label">Latest Post Age</div>
-            <div class="metric-value">{_age_min2} min</div>
-        </div>
-        """, unsafe_allow_html=True)
+    sentiment = latest.get('ai_analysis', {}).get('sentiment', 'N/A').upper()
+    sentiment_color = "#10B981" if sentiment == "POSITIVE" else "#EF4444" if sentiment == "NEGATIVE" else "#64748B"
+
+    try:
+        _lts = pick_ts(latest)
+        _ts = datetime.fromisoformat(_lts.replace('Z','+00:00'))
+        if _ts.tzinfo is None:
+            _ts = _ts.replace(tzinfo=timezone.utc)
+        _age_min2 = int((datetime.now(timezone.utc) - _ts.astimezone(timezone.utc)).total_seconds() / 60)
+    except Exception:
+        _age_min2 = 0
+
+    metric_payloads = [
+        ("Monitored Posts", len(alerts), None),
+        ("High Impact Alerts", high_impact_count, "#EF4444" if high_impact_count > 0 else "#0F172A"),
+        ("Latest Sentiment", sentiment, sentiment_color),
+        ("Latest Post Age", f"{_age_min2} min", None),
+    ]
+
+    for col, payload in zip((c1, c2, c3, c4), metric_payloads):
+        label, value, color = payload
+        with col:
+            st.markdown(metric_card(label, value, color), unsafe_allow_html=True)
 
     st.markdown("<br>", unsafe_allow_html=True)
-    latest_time_str = pick_ts_str(latest)
 
     # HERO SECTION (Latest Post)
     latest_ai = latest.get('ai_analysis', {})
-    is_high_impact = latest_ai.get('impact', False)
-    impact_class = "hero-alert-high" if is_high_impact else "hero-alert-low"
-    
-    # Recommendation Logic
-    recommendation = latest_ai.get('recommendation', 'None')
-    rec_html = ""
-    if recommendation and recommendation != "None":
-        # Inject tooltips into recommendation text
-        assets = latest_ai.get('affected_assets', [])
-        try:
-            recommendation_with_tooltips = inject_stock_tooltips(recommendation, assets)
-        except Exception:
-            recommendation_with_tooltips = recommendation
-        
-        rec_html = f"""<div style="margin-top:12px; padding:12px; background-color:#FEF3C7; border-left:4px solid #F59E0B; border-radius:4px;">
-<strong style="color:#B45309;">💰 Trading Recommendation:</strong> 
-<span style="color:#92400E; font-weight:600;">{recommendation_with_tooltips}</span>
-</div>"""
-    
-    st.markdown(f"""<div class="hero-card {impact_class}">
-<div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
-<span class="tag {'tag-red' if is_high_impact else 'tag-green'}">
-{'🚨 HIGH MARKET IMPACT' if is_high_impact else '✅ LOW IMPACT'}
-</span>
-<span class="tag tag-gray">{'REAL' if latest.get('source','real')=='real' else 'SIMULATED'}</span>
-<span style="color:#64748B; font-size:12px;">{to_local_str(pick_ts_str(latest))} ({local_tz_label()})</span>
-</div>
-<div class="post-content">“{display_text(latest)}”</div>
-{build_media_html(latest.get('media'), 4, 220)}
-{rec_html}
-<div style="margin-top:16px; padding-top:16px; border-top:1px solid #E2E8F0;">
-<div style="font-weight:600; font-size:14px; color:#475569; margin-bottom:4px;">🤖 AI Analyst Notes:</div>
-<div style="color:#334155; font-size:14px; margin-bottom:8px;">{latest_ai.get('reasoning', 'Analysis pending...')}</div>
-<div style="font-size:12px; color:#64748B; background-color:#F8FAFC; padding:8px; border-radius:4px; border:1px solid #E2E8F0;">
-<strong>🔍 Context Checked:</strong> {latest_ai.get('external_context_used', 'No external context data available.').replace('News Context:', '').strip()}
-</div>
-</div>
-</div>""", unsafe_allow_html=True)
+    st.markdown(render_alert_card(latest, latest=True), unsafe_allow_html=True)
     
     # FEED SECTION
     c_feed_title, c_feed_sort = st.columns([0.8, 0.2])
@@ -525,38 +543,7 @@ if alerts_vis:
     # List Layout
     _feed = alerts_vis[1:6]
     for _i, alert in enumerate(_feed):
-        ai = alert.get('ai_analysis', {})
-        is_high = ai.get('impact', False)
-        impact_class = "hero-alert-high" if is_high else "hero-alert-low"
-        ts_disp = to_local_str(pick_ts_str(alert))
-        rec = ai.get('recommendation', 'None')
-        assets = ai.get('affected_assets', [])
-        rec_html = ""
-        if rec and rec != "None":
-            try:
-                rec_with_tooltips = inject_stock_tooltips(rec, assets)
-            except Exception:
-                rec_with_tooltips = rec
-            rec_html = f"""<div style=\"margin-top:12px; padding:12px; background-color:#FEF3C7; border-left:4px solid #F59E0B; border-radius:4px;\">
-<strong style=\"color:#B45309;\">💰 Trading Recommendation:</strong>
-<span style=\"color:#92400E; font-weight:600;\">{rec_with_tooltips}</span>
-</div>"""
-
-        st.markdown(f"""<div class=\"hero-card {impact_class}\">
-<div style=\"display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;\">
-<span class=\"tag {'tag-red' if is_high else 'tag-green'}\">{'🚨 HIGH MARKET IMPACT' if is_high else '✅ LOW IMPACT'}</span>
-<span class=\"tag tag-gray\">{'REAL' if alert.get('source','real')=='real' else 'SIMULATED'}</span>
-<span style=\"color:#64748B; font-size:12px;\">{ts_disp} ({local_tz_label()})</span>
-</div>
-<div class=\"post-content\">“{display_text(alert)}”</div>
-{build_media_html(alert.get('media'), 3, 180)}
-{rec_html}
-<div style=\"margin-top:16px; padding-top:16px; border-top:1px solid #E2E8F0;\">
-<div style=\"font-weight:600; font-size:14px; color:#475569; margin-bottom:4px;\">🤖 AI Analyst Notes:</div>
-<div style=\"color:#334155; font-size:14px; margin-bottom:8px;\">{ai.get('reasoning', 'Analysis pending...')}</div>
-<div style=\"font-size:12px; color:#64748B; background-color:#F8FAFC; padding:8px; border-radius:4px; border:1px solid #E2E8F0;\">\n<strong>🔍 Context Checked:</strong> {(ai.get('external_context_used','No external context data available.')).replace('News Context:', '').strip()}\n</div>
-</div>
-</div>""", unsafe_allow_html=True)
+        st.markdown(render_alert_card(alert, latest=False), unsafe_allow_html=True)
 
         if _i < len(_feed) - 1:
             st.divider()
@@ -566,34 +553,90 @@ if alerts_vis:
         st.markdown("---")
         st.subheader("📚 Post Archive")
         with st.expander(f"View {len(alerts_vis)-6} older posts", expanded=False):
-            total = max(0, len(alerts_vis) - 6)
+            # Filter + view controls
+            f1, f2, f3 = st.columns([0.5, 0.25, 0.25])
+            search_text = f1.text_input(
+                "Search text",
+                key="archive_search",
+                placeholder="Filter content, assets, reasoning…"
+            )
+            sentiment_filter = f2.selectbox("Sentiment", ["All", "Positive", "Neutral", "Negative"], index=0)
+            impact_filter = f3.selectbox("Impact", ["All", "High", "Low"], index=0)
+
+            v1, v2 = st.columns([0.5, 0.5])
+            view_mode = v1.radio("View mode", ["Cards", "Table"], horizontal=True, key="archive_view")
+            page_size = v2.selectbox("Rows per page", [10, 20, 50], index=1, key="archive_page_size")
+
+            historical = alerts_vis[6:]
+
+            def _match(alert):
+                ai = alert.get('ai_analysis', {}) or {}
+                sent = (ai.get('sentiment') or '-').lower()
+                impact_val = "high" if ai.get('impact') else "low"
+                if sentiment_filter != "All" and sentiment_filter.lower() not in sent:
+                    return False
+                if impact_filter != "All" and impact_filter.lower() != impact_val:
+                    return False
+                if search_text:
+                    needle = search_text.lower().strip()
+                    text_blob = " ".join([
+                        (display_text(alert) or ""),
+                        ai.get('reasoning', '') or "",
+                        " ".join(map(str, ai.get('affected_assets', []) or []))
+                    ]).lower()
+                    if needle and needle not in text_blob:
+                        return False
+                return True
+
+            filtered = [a for a in historical if _match(a)]
+            total = len(filtered)
+
             if 'archive_page' not in st.session_state:
                 st.session_state['archive_page'] = 1
-            page_size = st.selectbox("Rows per page", [10, 20, 50], index=1)
+
             pages = max(1, (total + page_size - 1) // page_size)
             cur = min(max(int(st.session_state['archive_page']), 1), pages)
+
             cols_nav = st.columns([0.2, 0.6, 0.2])
             if cols_nav[0].button("◀ Prev", disabled=(cur <= 1)):
                 cur = max(1, cur - 1)
             if cols_nav[2].button("Next ▶", disabled=(cur >= pages)):
                 cur = min(pages, cur + 1)
+
             st.session_state['archive_page'] = cur
-            start = 6 + (cur - 1) * page_size
-            end = 6 + min(total, cur * page_size)
-            slice_alerts = alerts_vis[start:end]
-            df = pd.DataFrame([
-                {
-                    "Date": to_local_str(pick_ts_str(a)),
-                    "Content": display_text(a),
-                    "Impact": "High" if a.get('ai_analysis', {}).get('impact') else "Low",
-                    "Sentiment": a.get('ai_analysis', {}).get('sentiment', '-'),
-                    "AI Reasoning": a.get('ai_analysis', {}).get('reasoning', '-'),
-                    "Context Source": a.get('ai_analysis', {}).get('external_context_used', '-')
-                }
-                for a in slice_alerts
-            ])
-            st.caption(f"Page {cur} / {pages} · Showing {len(slice_alerts)} of {total}")
-            st.dataframe(df, width='stretch')
+
+            start = (cur - 1) * page_size
+            end = start + page_size
+            slice_alerts = filtered[start:end]
+
+            st.caption(
+                f"Page {cur} / {pages} · Showing {len(slice_alerts)} of {total} filtered · {len(historical)} total"
+            )
+
+            if not slice_alerts:
+                st.info("No posts match the current filters.")
+            elif view_mode == "Cards":
+                for _i, alert in enumerate(slice_alerts):
+                    st.markdown(render_alert_card(alert, latest=False), unsafe_allow_html=True)
+                    if _i < len(slice_alerts) - 1:
+                        st.divider()
+            else:
+                def _trim(text, n=240):
+                    text = text or ""
+                    return text if len(text) <= n else text[: n - 1] + "…"
+
+                df = pd.DataFrame([
+                    {
+                        "Date": to_local_str(pick_ts(a)),
+                        "Impact": "High" if a.get('ai_analysis', {}).get('impact') else "Low",
+                        "Sentiment": a.get('ai_analysis', {}).get('sentiment', '-'),
+                        "Assets": ", ".join(map(str, a.get('ai_analysis', {}).get('affected_assets', []) or [])) or "-",
+                        "Content": _trim(display_text(a)),
+                        "Reasoning": _trim(a.get('ai_analysis', {}).get('reasoning', '-'), 180),
+                    }
+                    for a in slice_alerts
+                ])
+                st.dataframe(df, width='stretch')
 else:
     st.info("System initializing... Waiting for first data fetch.")
 
