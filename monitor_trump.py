@@ -2,12 +2,10 @@ import time
 import os
 import json
 import re
-import random
 from datetime import datetime, timedelta, timezone
 from openai import OpenAI
 from ddgs import DDGS
 from urllib.request import Request, urlopen
-from urllib.error import URLError, HTTPError
 
 # ==========================================
 # CONFIGURATION
@@ -22,28 +20,18 @@ ALERTS_FILE = os.path.join(PROJECT_ROOT, "market_alerts.json")
 # SiliconFlow API Configuration
 SILICONFLOW_API_KEY = os.getenv("SILICONFLOW_API_KEY") 
 BASE_URL = "https://api.siliconflow.cn/v1"
+ 
+
+HUGGINGFACE_API_KEY = os.getenv("HUGGINGFACE_API_KEY")
+HUGGINGFACE_IMAGE_MODEL = os.getenv("HUGGINGFACE_IMAGE_MODEL", "Salesforce/blip-image-captioning-large")
+HF_API_URL = "https://api-inference.huggingface.co/models"
 
 # Apify Configuration
 TRUTH_ACCOUNT_ID = os.getenv("TRUTH_ACCOUNT_ID", "107780257626128497")
 TRUTH_COOKIE = os.getenv("TRUTH_COOKIE", "")
 TRUTH_USERNAME = os.getenv("TRUTH_USERNAME", "realDonaldTrump")
 
-# Optional local secrets override (not committed). If present, overrides envs.
-try:
-    secrets_paths = [
-        os.path.join(SCRIPT_DIR, "secrets.local.json"),
-        os.path.join(PROJECT_ROOT, "secrets.local.json"),
-    ]
-    for SECRETS_LOCAL in secrets_paths:
-        if os.path.exists(SECRETS_LOCAL):
-            with open(SECRETS_LOCAL, "r") as f:
-                _cfg = json.load(f)
-            TRUTH_COOKIE = _cfg.get("TRUTH_COOKIE", TRUTH_COOKIE)
-            TRUTH_ACCOUNT_ID = _cfg.get("TRUTH_ACCOUNT_ID", TRUTH_ACCOUNT_ID)
-            TRUTH_USERNAME = _cfg.get("TRUTH_USERNAME", TRUTH_USERNAME)
-            break
-except Exception:
-    pass
+ 
 
 # Basic stop words to filter out common noise
 STOP_WORDS = {
@@ -57,74 +45,6 @@ STOP_WORDS = {
     "donald", "trump", "realdonaldtrump", "truth", "social" # Filter self-references for search
 }
 
-# Templates for simulated posts (Rich Dataset)
-POST_TEMPLATES = [
-    # Market / Crypto / Economy (High Impact)
-    {
-        "content": "Bitcoin is going to the MOON! We will make America the Crypto Capital of the Planet. Digital Dollar is NOT happening!",
-        "impact": True, "assets": ["BTC", "COIN", "MSTR"], "rec": "Buy BTC", "sentiment": "positive",
-        "reasoning": "Strong endorsement of Bitcoin and rejection of CBDC suggests favorable regulatory environment for crypto assets."
-    },
-    {
-        "content": "Big Oil is back! We are opening up the pipelines. Energy costs will drop by 50% in my first year. Drill, Baby, Drill!",
-        "impact": True, "assets": ["XLE", "XOM", "CVX"], "rec": "Buy XLE", "sentiment": "positive",
-        "reasoning": "Deregulation promises for oil sector likely to boost energy stocks and reduce operational costs for majors."
-    },
-    {
-        "content": "Tariffs on foreign cars will be HUGE if they don't build plants here. protect our Auto Workers! America First!",
-        "impact": True, "assets": ["TM", "HMC", "F", "GM"], "rec": "Sell TM", "sentiment": "negative",
-        "reasoning": "Threat of tariffs on imported vehicles negatively impacts foreign automakers while potentially shielding domestic manufacturers."
-    },
-    {
-        "content": "The Federal Reserve needs to lower rates NOW. Our businesses are dying with these high rates. Powell must act!",
-        "impact": True, "assets": ["SPY", "TLT", "QQQ"], "rec": "Buy TLT", "sentiment": "positive",
-        "reasoning": "Pressure on Fed for rate cuts typically boosts bond prices and equity valuations, signaling potential monetary easing."
-    },
-    {
-        "content": "China trade deal phase 2 is looking very good. They want to buy our agricultural products like never before!",
-        "impact": True, "assets": ["DE", "ADM", "Soybeans"], "rec": "Buy DE", "sentiment": "positive",
-        "reasoning": "Potential trade deal focused on agriculture export would directly benefit farm equipment and ag-commodity sectors."
-    },
-
-    # Politics / Tech / General (Mixed Impact)
-    {
-        "content": "Social Media companies are censoring conservatives. We need to repeal Section 230 immediately! They are out of control.",
-        "impact": True, "assets": ["META", "GOOGL", "SNAP"], "rec": "Sell META", "sentiment": "negative",
-        "reasoning": "Legislative threat to Section 230 poses significant regulatory risk to ad-driven social media platforms."
-    },
-    {
-        "content": "My poll numbers are higher than any President in history. The people know the truth. We are winning everywhere!",
-        "impact": False, "assets": [], "rec": "None", "sentiment": "neutral",
-        "reasoning": "Standard political rhetoric with no direct economic policy implication."
-    },
-    {
-        "content": "Just landed in Florida. Beautiful crowd at the airport. Thank you for the support!",
-        "impact": False, "assets": [], "rec": "None", "sentiment": "positive",
-        "reasoning": "Personal update, no market relevance."
-    },
-    {
-        "content": "The Border is a disaster. We need to close it down and finish the Wall. National Security is priority #1.",
-        "impact": False, "assets": ["GEO", "CXW"], "rec": "None", "sentiment": "neutral",
-        "reasoning": "Border policy reiteration; potential long-term impact on private prisons/defense but no immediate market trigger."
-    },
-    {
-        "content": "Fake News CNN is at it again. Their ratings are in the toilet. Nobody watches them!",
-        "impact": False, "assets": ["WBD"], "rec": "None", "sentiment": "negative",
-        "reasoning": "Media criticism, typical behavior, negligible market impact."
-    },
-    
-    # More Filler
-    {"content": "Make America Great Again!", "impact": False},
-    {"content": "The radical left is destroying our country.", "impact": False},
-    {"content": "We will save the Auto Industry!", "impact": True, "assets": ["GM", "F"], "rec": "Buy GM", "reasoning": "General support for domestic auto industry."},
-    {"content": "Thank you Iowa! A massive victory is coming.", "impact": False},
-    {"content": "Inflation is killing the middle class. We will fix it.", "impact": False},
-    {"content": "Peace through strength. No more endless wars.", "impact": True, "assets": ["LMT", "RTX"], "rec": "Hold LMT", "reasoning": "Shift in foreign policy may affect defense contracts volatility."},
-    {"content": "Election integrity is vital.", "impact": False},
-    {"content": "Meeting with world leaders next week. They respect America again.", "impact": False},
-    {"content": "Taxes will be lower than ever. Corporate tax to 15%!", "impact": True, "assets": ["SPY", "IWM"], "rec": "Buy IWM", "reasoning": "Corporate tax cuts disproportionately benefit small caps (Russell 2000) and domestic earners."},
-    {"content": "Have a great Sunday everyone!", "impact": False}
-]
 
 # ==========================================
 # AI ANALYSIS FUNCTIONS
@@ -183,6 +103,42 @@ def fetch_external_context(query_text):
     except Exception:
         return "No related external news found."
 
+def hf_caption_image(image_url, timeout=15):
+    try:
+        if not HUGGINGFACE_API_KEY:
+            return ""
+        if not image_url:
+            return ""
+        with urlopen(Request(image_url, headers={"User-Agent":"Mozilla/5.0"}), timeout=timeout) as r:
+            img_bytes = r.read()
+        req = Request(f"{HF_API_URL}/{HUGGINGFACE_IMAGE_MODEL}", data=img_bytes, headers={
+            "Authorization": f"Bearer {HUGGINGFACE_API_KEY}",
+            "Content-Type": "application/octet-stream",
+            "Accept": "application/json"
+        })
+        with urlopen(req, timeout=timeout) as resp:
+            body = resp.read()
+        try:
+            data = json.loads(body)
+        except Exception:
+            return ""
+        if isinstance(data, list) and data:
+            if isinstance(data[0], dict) and "generated_text" in data[0]:
+                return str(data[0].get("generated_text") or "").strip()
+            labels = []
+            for it in data[:3]:
+                lbl = str(it.get("label") or "").strip()
+                if lbl:
+                    labels.append(lbl)
+            return ", ".join(labels)
+        if isinstance(data, dict):
+            txt = str(data.get("generated_text") or "").strip()
+            if txt:
+                return txt
+        return ""
+    except Exception:
+        return ""
+
 def get_recent_posts_context(limit=3):
     """Retrieves the last few posts to provide trend context for AI analysis."""
     try:
@@ -196,7 +152,7 @@ def get_recent_posts_context(limit=3):
         return "No recent posts available."
     return "No recent posts available."
 
-def analyze_with_ai(post_content):
+def analyze_with_ai(post_content, media=None):
     """
     Analyzes the post content using DeepSeek model via SiliconFlow API.
     Returns a dictionary with analysis results.
@@ -208,16 +164,46 @@ def analyze_with_ai(post_content):
             "summary": "AI Analysis disabled (No API Key)."
         }
 
-    # Fetch external context
-    external_context = fetch_external_context(post_content)
-    
-    # Fetch recent posts context (for trend analysis)
-    recent_posts_context = get_recent_posts_context(limit=5)
+    media_context = "No media attached."
+    caption_text = ""
+    try:
+        arr = media or []
+        if arr:
+            lines = []
+            caps = []
+            for i, m in enumerate(arr[:3]):
+                u = m.get("preview_url") or m.get("url") or ""
+                t = (m.get("type") or "").lower()
+                label = "video" if t in ("video", "gifv") else "image"
+                cap = hf_caption_image(u) if u else ""
+                if not cap:
+                    d = (m.get("description") or "").strip()
+                    cap = d if d else label
+                lines.append(f"[{i+1}] ({label}) {cap} | {u}")
+                if cap:
+                    caps.append(cap)
+            media_context = "\n".join(lines)
+            caption_text = " ".join(caps)
+    except Exception:
+        media_context = "No media attached."
+        caption_text = ""
 
     client = OpenAI(
         api_key=SILICONFLOW_API_KEY,
         base_url=BASE_URL
     )
+
+    combined_text = (post_content or "").strip()
+    if caption_text and combined_text:
+        combined_text = combined_text + " [Media Interpretation] " + caption_text
+    elif caption_text and not combined_text:
+        combined_text = caption_text
+
+    # Fetch external context (always call with the combined text)
+    external_context = fetch_external_context(combined_text)
+    
+    # Fetch recent posts context (for trend analysis)
+    recent_posts_context = get_recent_posts_context(limit=5)
 
     prompt = f"""
     You are a senior Wall Street financial analyst (Hedge Fund level). Analyze the following social media post by Donald Trump.
@@ -233,10 +219,13 @@ def analyze_with_ai(post_content):
     
     [Recent Trump Posts (For Trend Context)]
     {recent_posts_context}
+    
+    [Attached Media]
+    {media_context}
     ---
     
     **CURRENT POST:**
-    "{post_content}"
+    "{combined_text}"
     
     **RESPONSE FORMAT (JSON ONLY):**
     {{
@@ -273,6 +262,8 @@ def analyze_with_ai(post_content):
                 context_preview = "External market data used."
         
         result_json['external_context_used'] = context_preview
+        result_json['media_used'] = bool(media_context and media_context != "No media attached.")
+        result_json['media_caption_used'] = bool(caption_text)
         
         return result_json
 
@@ -287,6 +278,19 @@ def analyze_with_ai(post_content):
 # ==========================================
 # MONITORING FUNCTIONS
 # ==========================================
+
+def fetch_json_with_retries(url, headers, timeout=15, retries=3, backoff=2):
+    last_err = None
+    for i in range(int(retries)):
+        try:
+            req = Request(url, headers=headers)
+            with urlopen(req, timeout=timeout) as resp:
+                body = resp.read()
+                return json.loads(body)
+        except Exception as e:
+            last_err = e
+            time.sleep(backoff * (i + 1))
+    raise last_err
 
 def load_processed_posts():
     """
@@ -326,20 +330,39 @@ def save_alert(post, keywords, ai_analysis=None, source=None):
     try:
         for m in atts:
             mt = str(m.get("type", "")).lower()
-            if not mt or mt == "image":
-                mu = m.get("url") or m.get("remote_url") or m.get("preview_url")
+            mu = m.get("url") or m.get("remote_url") or m.get("preview_url")
+            if mu and (not mt or mt in ("image", "gifv", "video")):
                 media.append({
                     "url": mu,
                     "preview_url": m.get("preview_url") or mu,
-                    "description": m.get("description") or ""
+                    "description": m.get("description") or "",
+                    "type": mt or "image"
                 })
     except Exception:
         media = []
 
+    _content = post.get("content") or post.get("text", "") or ""
+    if (not str(_content).strip()) and media:
+        try:
+            _descs = [d.get("description") for d in media if str(d.get("description", "")).strip()]
+            if _descs:
+                _content = " ".join(_descs)
+            else:
+                vc = sum(1 for x in media if (x.get("type") or "").lower() in ("video", "gifv"))
+                ic = len(media) - vc
+                if vc > 0:
+                    _content = f"[视频] {vc} 个"
+                else:
+                    _content = f"[图片] {ic} 张"
+        except Exception:
+            vc = sum(1 for x in media if (x.get("type") or "").lower() in ("video", "gifv"))
+            ic = len(media) - vc
+            _content = f"[视频] {vc} 个" if vc > 0 else f"[图片] {ic} 张"
+
     alert_data = {
         "id": post.get("id"),
         "created_at": created_iso,
-        "content": post.get("content") or post.get("text", ""),
+        "content": _content,
         "url": post.get("url", "https://truthsocial.com/@realDonaldTrump"),
         "media": media,
         "keywords": keywords,
@@ -367,8 +390,7 @@ def save_alert(post, keywords, ai_analysis=None, source=None):
     
     print(f"Alert saved to {ALERTS_FILE}")
 
-def generate_history():
-    return 0
+ 
 
 def generate_simulated_post():
     return {
@@ -383,18 +405,26 @@ def run_fetch_recent(limit=20):
     if TRUTH_COOKIE and TRUTH_ACCOUNT_ID and str(TRUTH_ACCOUNT_ID).isdigit():
         try:
             url = f"https://truthsocial.com/api/v1/accounts/{TRUTH_ACCOUNT_ID}/statuses?exclude_replies=true&with_muted=true&limit={int(limit)}"
-            req = Request(url, headers={
+            headers = {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
                 "Accept": "application/json, text/plain, */*",
                 "Accept-Language": "en-US,en;q=0.9",
                 "Origin": "https://truthsocial.com",
                 "Referer": f"https://truthsocial.com/@{TRUTH_USERNAME}",
                 "Cookie": TRUTH_COOKIE,
-            })
+            }
             print(f"CookieAPI request: {url}")
-            with urlopen(req, timeout=20) as resp:
-                body = resp.read()
-                items = json.loads(body)
+            try:
+                items = fetch_json_with_retries(url, headers, timeout=15, retries=2, backoff=2)
+            except Exception as e:
+                print(f"CookieAPI primary failed: {e}")
+                try:
+                    url2 = f"https://truthsocial.com/api/v1/accounts/{TRUTH_ACCOUNT_ID}/statuses?exclude_replies=true&with_muted=true&limit={min(5, int(limit))}"
+                    print(f"CookieAPI retry request: {url2}")
+                    items = fetch_json_with_retries(url2, headers, timeout=25, retries=2, backoff=3)
+                except Exception as e2:
+                    print(f"CookieAPI fallback failed: {e2}")
+                    return 0
             print(f"CookieAPI fetched items: {len(items) if isinstance(items, list) else 0}")
             processed_ids = load_processed_posts()
             new_posts_count = 0
@@ -412,18 +442,28 @@ def run_fetch_recent(limit=20):
                 content_html = post.get("content") or ""
                 content = re.sub(r"<[^>]+>", " ", content_html)
                 content = re.sub(r"\s+", " ", content).strip()
+                media_atts = post.get("media_attachments", [])
+                if not content and media_atts:
+                    try:
+                        descs = [str(m.get("description") or "").strip() for m in media_atts if str(m.get("description") or "").strip()]
+                        if descs:
+                            content = " ".join(descs)
+                        else:
+                            content = f"[图片] {len(media_atts)} 张"
+                    except Exception:
+                        content = f"[图片] {len(media_atts)} 张"
                 keywords = extract_keywords(content)
-                ai_result = analyze_with_ai(content)
+                ai_result = analyze_with_ai(content, media=media_atts)
                 created_iso = post.get("created_at") or datetime.now(timezone.utc).isoformat()
                 url = post.get("url") or "https://truthsocial.com/@realDonaldTrump"
                 if alerts_empty:
-                    save_alert({"id": post_id or f"api_{int(time.time())}", "content": content, "created_at": created_iso, "url": url, "media_attachments": post.get("media_attachments", [])}, keywords, ai_result, source="real")
+                    save_alert({"id": post_id or f"api_{int(time.time())}", "content": content, "created_at": created_iso, "url": url, "media_attachments": media_atts}, keywords, ai_result, source="real")
                     if post_id:
                         processed_ids.add(post_id)
                     new_posts_count += 1
                 else:
                     if post_id and post_id not in processed_ids:
-                        save_alert({"id": post_id, "content": content, "created_at": created_iso, "url": url, "media_attachments": post.get("media_attachments", [])}, keywords, ai_result, source="real")
+                        save_alert({"id": post_id, "content": content, "created_at": created_iso, "url": url, "media_attachments": media_atts}, keywords, ai_result, source="real")
                         processed_ids.add(post_id)
                         new_posts_count += 1
             save_processed_posts(processed_ids)
@@ -447,10 +487,4 @@ def purge_simulated_alerts():
     except Exception:
         return 0
 
-def run_one_check_free():
-    return 0
-def run_monitoring_loop():
-    return
-
-if __name__ == "__main__":
-    pass
+ 

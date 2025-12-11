@@ -254,16 +254,44 @@ def build_media_html(media, max_images=4, width=220):
         for m in media:
             if cnt >= int(max_images):
                 break
-            src = m.get("preview_url") or m.get("url")
-            if not src:
-                continue
-            imgs.append(f'<img src="{src}" alt="" style="max-width:{int(width)}px; border-radius:8px; border:1px solid #E2E8F0;" onerror="this.style.display=\'none\';" />')
+            t = (m.get("type") or "").lower()
+            vsrc = m.get("url") or m.get("remote_url") or ""
+            poster = m.get("preview_url") or ""
+            is_video = t in ("video", "gifv") or (vsrc and (".mp4" in vsrc or "video" in vsrc))
+            if is_video and vsrc:
+                vw = int(width * 2)
+                attrs = f'style="max-width:{vw}px; border-radius:8px; border:1px solid #E2E8F0;" playsinline controls preload="metadata"'
+                if poster:
+                    attrs += f' poster="{poster}"'
+                imgs.append(f'<video src="{vsrc}" {attrs} onerror="this.style.display=\'none\';"></video>')
+            else:
+                src = poster or m.get("url") or ""
+                if not src:
+                    continue
+                imgs.append(f'<img src="{src}" alt="" style="max-width:{int(width)}px; border-radius:8px; border:1px solid #E2E8F0;" onerror="this.style.display=\'none\';" />')
             cnt += 1
         if not imgs:
             return ""
         return '<div style="margin-top:12px; display:flex; gap:8px; flex-wrap:wrap;">' + ''.join(imgs) + '</div>'
     except Exception:
         return ""
+
+def display_text(item):
+    try:
+        c = (item.get('content') or '').strip()
+        if c:
+            return c
+        arr = item.get('media') or []
+        _descs = [str(m.get('description') or '').strip() for m in arr if str(m.get('description') or '').strip()]
+        if _descs:
+            return ' '.join(_descs)
+        if arr:
+            vc = sum(1 for x in arr if (x.get('type') or '').lower() in ('video','gifv'))
+            ic = len(arr) - vc
+            return f"[视频] {vc} 个" if vc>0 else f"[图片] {ic} 张"
+        return ''
+    except Exception:
+        return item.get('content','')
 
 def build_time_html(iso_str):
     try:
@@ -329,26 +357,13 @@ def pick_ts_str(alert):
 
 alerts = load_alerts()
 if not alerts:
-    try:
-        from monitor_trump import run_fetch_recent, generate_simulated_post, extract_keywords, analyze_with_ai
-        run_fetch_recent(limit=20)
-        alerts = load_alerts()
-        if not alerts:
-            p = generate_simulated_post()
-            content = p.get("content")
-            keywords = extract_keywords(content)
-            ai_result = analyze_with_ai(content)
-            try:
-                with open(ALERTS_FILE, "r") as f:
-                    arr = json.load(f)
-            except Exception:
-                arr = []
-            arr.insert(0, {"id": p.get("id"), "content": content, "created_at": p.get("created_at"), "url": p.get("url"), "ai_analysis": ai_result, "source": "simulated"})
-            with open(ALERTS_FILE, "w") as f:
-                json.dump(arr, f, indent=2, ensure_ascii=False)
-            alerts = load_alerts()
-    except Exception:
-        alerts = []
+    with st.spinner("Fetching initial posts (first run)..."):
+        try:
+            from monitor_trump import run_fetch_recent
+            run_fetch_recent(limit=20)
+        except Exception:
+            pass
+    alerts = load_alerts()
 
 if 'last_api_check' not in st.session_state:
     st.session_state['last_api_check'] = time.time()
@@ -405,8 +420,9 @@ with c_control:
 st.markdown("---")
 
 # Metrics Grid
-if alerts:
-    latest = alerts[0]
+alerts_vis = [a for a in alerts if str(display_text(a) or '').strip()]
+if alerts_vis:
+    latest = alerts_vis[0]
     high_impact_count = sum(1 for a in alerts if a.get('ai_analysis', {}).get('impact'))
     
     c1, c2, c3, c4 = st.columns(4)
@@ -485,7 +501,7 @@ if alerts:
 <span class="tag tag-gray">{'REAL' if latest.get('source','real')=='real' else 'SIMULATED'}</span>
 <span style="color:#64748B; font-size:12px;">{build_time_html(pick_ts_str(latest))}</span>
 </div>
-<div class="post-content">“{latest.get('content','')}”</div>
+<div class="post-content">“{display_text(latest)}”</div>
 {build_media_html(latest.get('media'), 4, 220)}
 {rec_html}
 <div style="margin-top:16px; padding-top:16px; border-top:1px solid #E2E8F0;">
@@ -503,7 +519,8 @@ if alerts:
         st.subheader("📜 Recent Posts")
     
     # List Layout
-    for alert in alerts[1:6]:
+    _feed = alerts_vis[1:6]
+    for _i, alert in enumerate(_feed):
         ai = alert.get('ai_analysis', {})
         is_high = ai.get('impact', False)
         impact_class = "hero-alert-high" if is_high else "hero-alert-low"
@@ -527,7 +544,7 @@ if alerts:
 <span class=\"tag tag-gray\">{'REAL' if alert.get('source','real')=='real' else 'SIMULATED'}</span>
 <span style=\"color:#64748B; font-size:12px;\">{ts_disp}</span>
 </div>
-<div class=\"post-content\">“{alert.get('content','')}”</div>
+<div class=\"post-content\">“{display_text(alert)}”</div>
 {build_media_html(alert.get('media'), 3, 180)}
 {rec_html}
 <div style=\"margin-top:16px; padding-top:16px; border-top:1px solid #E2E8F0;\">
@@ -537,27 +554,42 @@ if alerts:
 </div>
 </div>""", unsafe_allow_html=True)
 
-        st.divider()
+        if _i < len(_feed) - 1:
+            st.divider()
 
-    # Historical Data
-    if len(alerts) > 6:
+    # Historical Data (Paginated)
+    if len(alerts_vis) > 6:
         st.markdown("---")
         st.subheader("📚 Post Archive")
-        with st.expander(f"View {len(alerts)-6} older posts", expanded=False):
-            st.dataframe(
-                pd.DataFrame([
-                    {
-                        "Date": to_local_str(pick_ts_str(a)),
-                        "Content": a.get('content',''),
-                        "Impact": "High" if a.get('ai_analysis', {}).get('impact') else "Low",
-                        "Sentiment": a.get('ai_analysis', {}).get('sentiment', '-'),
-                        "AI Reasoning": a.get('ai_analysis', {}).get('reasoning', '-'),
-                        "Context Source": a.get('ai_analysis', {}).get('external_context_used', '-')
-                    }
-                    for a in alerts[6:]
-                ]),
-                width='stretch'
-            )
+        with st.expander(f"View {len(alerts_vis)-6} older posts", expanded=False):
+            total = max(0, len(alerts_vis) - 6)
+            if 'archive_page' not in st.session_state:
+                st.session_state['archive_page'] = 1
+            page_size = st.selectbox("Rows per page", [10, 20, 50], index=1)
+            pages = max(1, (total + page_size - 1) // page_size)
+            cur = min(max(int(st.session_state['archive_page']), 1), pages)
+            cols_nav = st.columns([0.2, 0.6, 0.2])
+            if cols_nav[0].button("◀ Prev", disabled=(cur <= 1)):
+                cur = max(1, cur - 1)
+            if cols_nav[2].button("Next ▶", disabled=(cur >= pages)):
+                cur = min(pages, cur + 1)
+            st.session_state['archive_page'] = cur
+            start = 6 + (cur - 1) * page_size
+            end = 6 + min(total, cur * page_size)
+            slice_alerts = alerts_vis[start:end]
+            df = pd.DataFrame([
+                {
+                    "Date": to_local_str(pick_ts_str(a)),
+                    "Content": display_text(a),
+                    "Impact": "High" if a.get('ai_analysis', {}).get('impact') else "Low",
+                    "Sentiment": a.get('ai_analysis', {}).get('sentiment', '-'),
+                    "AI Reasoning": a.get('ai_analysis', {}).get('reasoning', '-'),
+                    "Context Source": a.get('ai_analysis', {}).get('external_context_used', '-')
+                }
+                for a in slice_alerts
+            ])
+            st.caption(f"Page {cur} / {pages} · Showing {len(slice_alerts)} of {total}")
+            st.dataframe(df, width='stretch')
 else:
     st.info("System initializing... Waiting for first data fetch.")
 
