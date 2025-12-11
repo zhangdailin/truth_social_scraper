@@ -499,7 +499,7 @@ if alerts_vis:
 {'🚨 HIGH MARKET IMPACT' if is_high_impact else '✅ LOW IMPACT'}
 </span>
 <span class="tag tag-gray">{'REAL' if latest.get('source','real')=='real' else 'SIMULATED'}</span>
-<span style="color:#64748B; font-size:12px;">{build_time_html(pick_ts_str(latest))}</span>
+<span style="color:#64748B; font-size:12px;">{to_local_str(pick_ts_str(latest))} ({local_tz_label()})</span>
 </div>
 <div class="post-content">“{display_text(latest)}”</div>
 {build_media_html(latest.get('media'), 4, 220)}
@@ -524,7 +524,7 @@ if alerts_vis:
         ai = alert.get('ai_analysis', {})
         is_high = ai.get('impact', False)
         impact_class = "hero-alert-high" if is_high else "hero-alert-low"
-        ts_disp = build_time_html(pick_ts_str(alert))
+        ts_disp = to_local_str(pick_ts_str(alert))
         rec = ai.get('recommendation', 'None')
         assets = ai.get('affected_assets', [])
         rec_html = ""
@@ -542,7 +542,7 @@ if alerts_vis:
 <div style=\"display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;\">
 <span class=\"tag {'tag-red' if is_high else 'tag-green'}\">{'🚨 HIGH MARKET IMPACT' if is_high else '✅ LOW IMPACT'}</span>
 <span class=\"tag tag-gray\">{'REAL' if alert.get('source','real')=='real' else 'SIMULATED'}</span>
-<span style=\"color:#64748B; font-size:12px;\">{ts_disp}</span>
+<span style=\"color:#64748B; font-size:12px;\">{ts_disp} ({local_tz_label()})</span>
 </div>
 <div class=\"post-content\">“{display_text(alert)}”</div>
 {build_media_html(alert.get('media'), 3, 180)}
