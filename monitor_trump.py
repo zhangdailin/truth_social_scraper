@@ -6,6 +6,10 @@ from datetime import datetime, timedelta, timezone
 from openai import OpenAI
 from ddgs import DDGS
 from urllib.request import Request, urlopen
+import socket
+import ssl
+from urllib.parse import urlsplit
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ==========================================
 # CONFIGURATION
@@ -25,6 +29,8 @@ BASE_URL = "https://api.siliconflow.cn/v1"
 HUGGINGFACE_API_KEY = os.getenv("HUGGINGFACE_API_KEY")
 HUGGINGFACE_IMAGE_MODEL = os.getenv("HUGGINGFACE_IMAGE_MODEL", "Salesforce/blip-image-captioning-large")
 HF_API_URL = "https://api-inference.huggingface.co/models"
+USE_SOCKS5_PROXY = True
+SOCKS5_COUNTRY = "US"
 
 # Apify Configuration
 TRUTH_ACCOUNT_ID = os.getenv("TRUTH_ACCOUNT_ID", "107780257626128497")
@@ -292,6 +298,129 @@ def fetch_json_with_retries(url, headers, timeout=15, retries=3, backoff=2):
             time.sleep(backoff * (i + 1))
     raise last_err
 
+def fetch_public_socks5(limit=12):
+    items = []
+    srcs = [
+        "https://www.proxy-list.download/api/v1/get?type=socks5",
+        "https://api.proxyscrape.com/v2/?request=getproxies&protocol=socks5&timeout=2000&country=all&simplified=true",
+    ]
+    for s in srcs:
+        try:
+            with urlopen(Request(s, headers={"User-Agent":"Mozilla/5.0"}), timeout=10) as r:
+                body = r.read().decode("utf-8", errors="ignore")
+            for line in body.splitlines():
+                p = line.strip()
+                if p and ":" in p:
+                    items.append(p)
+        except Exception:
+            continue
+    out = []
+    seen = set()
+    for p in items:
+        if p not in seen:
+            seen.add(p)
+            out.append(p)
+    return out[:int(limit)]
+
+def socks5_connect(proxy, host, port, timeout=12, use_ssl=False):
+    ph, pp = proxy.split(":")
+    pp = int(pp)
+    s = socket.create_connection((ph, pp), timeout=timeout)
+    s.sendall(b"\x05\x01\x00")
+    msel = s.recv(2)
+    dest = host.encode("utf-8")
+    req = b"\x05\x01\x00\x03" + bytes([len(dest)]) + dest + port.to_bytes(2, "big")
+    s.sendall(req)
+    resp = s.recv(10)
+    if use_ssl:
+        ctx = ssl.create_default_context()
+        s = ctx.wrap_socket(s, server_hostname=host)
+    return s
+
+def http_get_via_socks5(url, headers, proxy, timeout=20):
+    u = urlsplit(url)
+    host = u.hostname
+    port = u.port or (443 if u.scheme == "https" else 80)
+    path = u.path or "/"
+    if u.query:
+        path = path + "?" + u.query
+    use_ssl = u.scheme == "https"
+    s = socks5_connect(proxy, host, port, timeout=timeout, use_ssl=use_ssl)
+    req = f"GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n" + "\r\n".join([f"{k}: {v}" for k,v in headers.items()]) + "\r\n\r\n"
+    s.sendall(req.encode("utf-8"))
+    chunks = []
+    while True:
+        data = s.recv(4096)
+        if not data:
+            break
+        chunks.append(data)
+    s.close()
+    raw = b"".join(chunks)
+    sep = raw.find(b"\r\n\r\n")
+    body = raw[sep+4:] if sep != -1 else raw
+    try:
+        txt = body.decode("utf-8")
+        if txt.startswith("0\r\n") or "\r\n" in txt.splitlines()[0]:
+            pass
+    except Exception:
+        pass
+    return json.loads(body)
+
+def socks5_check_country(proxy, expect=SOCKS5_COUNTRY, timeout=4):
+    try:
+        data = http_get_via_socks5("http://ip-api.com/json/?fields=status,countryCode", {"User-Agent":"Mozilla/5.0"}, proxy, timeout=timeout)
+        cc = str(data.get("countryCode") or "").upper()
+        ok = str(data.get("status") or "") == "success" and cc == expect
+        if ok:
+            return True
+    except Exception:
+        pass
+    try:
+        data = http_get_via_socks5("https://ipinfo.io/json", {"User-Agent":"Mozilla/5.0"}, proxy, timeout=timeout)
+        cc = str(data.get("country") or "").upper()
+        return cc == expect
+    except Exception:
+        return False
+
+def get_candidate_socks5(limit=6):
+    cand = fetch_public_socks5(limit=limit*10)
+    want = int(limit)
+    out = []
+    max_workers = min(len(cand), 32) or 1
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        futs = {ex.submit(socks5_check_country, p, SOCKS5_COUNTRY): p for p in cand}
+        for fut in as_completed(futs):
+            p = futs[fut]
+            ok = False
+            try:
+                ok = bool(fut.result())
+            except Exception:
+                ok = False
+            if ok:
+                out.append(p)
+                if len(out) >= want:
+                    break
+    return out
+
+def race_fetch_json_via_socks5(url, headers, proxies, timeout=16):
+    if not proxies:
+        return None
+    res = [None]
+    def attempt(px):
+        try:
+            data = http_get_via_socks5(url, headers, proxy=px, timeout=timeout)
+            if isinstance(data, list) and not res[0]:
+                res[0] = data
+        except Exception:
+            pass
+    max_workers = min(len(proxies), 16) or 1
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        futs = [ex.submit(attempt, p) for p in proxies]
+        for _ in as_completed(futs):
+            if res[0]:
+                break
+    return res[0]
+
 def load_processed_posts():
     """
     Loads the set of processed post IDs from the local JSON file.
@@ -424,7 +553,18 @@ def run_fetch_recent(limit=20):
                     items = fetch_json_with_retries(url2, headers, timeout=25, retries=2, backoff=3)
                 except Exception as e2:
                     print(f"CookieAPI fallback failed: {e2}")
-                    return 0
+                    if USE_SOCKS5_PROXY:
+                        try:
+                            proxies = get_candidate_socks5(limit=8)
+                            print(f"CookieAPI proxy candidates: {len(proxies)}")
+                            items = race_fetch_json_via_socks5(url, headers, proxies, timeout=16)
+                            if not isinstance(items, list):
+                                return 0
+                        except Exception as pe2:
+                            print(f"Proxy pipeline error: {pe2}")
+                            return 0
+                    else:
+                        return 0
             print(f"CookieAPI fetched items: {len(items) if isinstance(items, list) else 0}")
             processed_ids = load_processed_posts()
             new_posts_count = 0
