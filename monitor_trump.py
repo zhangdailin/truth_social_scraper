@@ -4,17 +4,17 @@ import json
 import re
 import random
 from datetime import datetime, timedelta, timezone
-from apify_client import ApifyClient
-from apify_client.errors import ApifyApiError
 from openai import OpenAI
 from ddgs import DDGS
+from urllib.request import Request, urlopen
+from urllib.error import URLError, HTTPError
 
 # ==========================================
 # CONFIGURATION
 # ==========================================
 # Determine paths relative to this script to ensure consistency
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-PROJECT_ROOT = SCRIPT_DIR
+PROJECT_ROOT = os.path.dirname(SCRIPT_DIR) # Go up one level to 'L'
 
 PROCESSED_LOG_FILE = os.path.join(PROJECT_ROOT, "processed_posts.json")
 ALERTS_FILE = os.path.join(PROJECT_ROOT, "market_alerts.json")
@@ -24,7 +24,26 @@ SILICONFLOW_API_KEY = os.getenv("SILICONFLOW_API_KEY")
 BASE_URL = "https://api.siliconflow.cn/v1"
 
 # Apify Configuration
-APIFY_TOKEN = os.getenv("APIFY_TOKEN") 
+TRUTH_ACCOUNT_ID = os.getenv("TRUTH_ACCOUNT_ID", "107780257626128497")
+TRUTH_COOKIE = os.getenv("TRUTH_COOKIE", "")
+TRUTH_USERNAME = os.getenv("TRUTH_USERNAME", "realDonaldTrump")
+
+# Optional local secrets override (not committed). If present, overrides envs.
+try:
+    secrets_paths = [
+        os.path.join(SCRIPT_DIR, "secrets.local.json"),
+        os.path.join(PROJECT_ROOT, "secrets.local.json"),
+    ]
+    for SECRETS_LOCAL in secrets_paths:
+        if os.path.exists(SECRETS_LOCAL):
+            with open(SECRETS_LOCAL, "r") as f:
+                _cfg = json.load(f)
+            TRUTH_COOKIE = _cfg.get("TRUTH_COOKIE", TRUTH_COOKIE)
+            TRUTH_ACCOUNT_ID = _cfg.get("TRUTH_ACCOUNT_ID", TRUTH_ACCOUNT_ID)
+            TRUTH_USERNAME = _cfg.get("TRUTH_USERNAME", TRUTH_USERNAME)
+            break
+except Exception:
+    pass
 
 # Basic stop words to filter out common noise
 STOP_WORDS = {
@@ -302,11 +321,27 @@ def save_alert(post, keywords, ai_analysis=None, source=None):
     except Exception:
         created_iso = datetime.now(timezone.utc).isoformat()
 
+    atts = post.get("media_attachments") or post.get("media") or []
+    media = []
+    try:
+        for m in atts:
+            mt = str(m.get("type", "")).lower()
+            if not mt or mt == "image":
+                mu = m.get("url") or m.get("remote_url") or m.get("preview_url")
+                media.append({
+                    "url": mu,
+                    "preview_url": m.get("preview_url") or mu,
+                    "description": m.get("description") or ""
+                })
+    except Exception:
+        media = []
+
     alert_data = {
         "id": post.get("id"),
         "created_at": created_iso,
         "content": post.get("content") or post.get("text", ""),
         "url": post.get("url", "https://truthsocial.com/@realDonaldTrump"),
+        "media": media,
         "keywords": keywords,
         "ai_analysis": ai_analysis,
         "detected_at": datetime.now(timezone.utc).isoformat(),
@@ -343,64 +378,60 @@ def generate_simulated_post():
         "url": "https://truthsocial.com/@realDonaldTrump"
     }
 
-def norm_ts_to_utc_iso(s):
-    try:
-        if not s:
-            return datetime.now(timezone.utc).isoformat()
-        s2 = str(s).replace('Z','+00:00')
-        dt = datetime.fromisoformat(s2)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        return dt.astimezone(timezone.utc).isoformat()
-    except Exception:
-        return datetime.now(timezone.utc).isoformat()
-
-def get_apify_items(limit):
-    client = ApifyClient(APIFY_TOKEN)
-    run_input = {"searchQueries": ["realDonaldTrump"], "resultsLimit": int(limit), "maxItems": int(limit)}
-    items = []
-    try:
-        run = client.actor("muhammetakkurtt/truth-social-scraper").call(run_input=run_input)
-        if run:
-            items = list(client.dataset(run["defaultDatasetId"]).iterate_items())
-        else:
-            items = [generate_simulated_post()]
-    except ApifyApiError:
-        items = []
-    except Exception:
-        items = []
-    return items
-
-def process_items_recursive(items, i, processed_ids, new_posts_count):
-    if i >= len(items):
-        return new_posts_count, processed_ids
-    post = items[i]
-    post_id = post.get("id")
-    if post_id and post_id not in processed_ids:
-        content = post.get("content") or post.get("text", "")
-        keywords = extract_keywords(content)
-        ai_result = analyze_with_ai(content)
-        created = post.get("createdAt") or post.get("created_at")
-        created_iso = norm_ts_to_utc_iso(created)
-        save_alert({"id": post_id, "content": content, "created_at": created_iso, "url": post.get("url", "https://truthsocial.com/@realDonaldTrump")}, keywords, ai_result, source="real")
-        processed_ids.add(post_id)
-        new_posts_count += 1
-    return process_items_recursive(items, i + 1, processed_ids, new_posts_count)
-
-def fetch_from_apify(limit):
-    if not APIFY_TOKEN:
-        return 0
-    items = get_apify_items(limit)
-    processed_ids = load_processed_posts()
-    new_posts_count, processed_ids = process_items_recursive(items, 0, processed_ids, 0)
-    save_processed_posts(processed_ids)
-    return new_posts_count
-
-def run_one_check():
-    return fetch_from_apify(5)
 
 def run_fetch_recent(limit=20):
-    return fetch_from_apify(int(limit))
+    if TRUTH_COOKIE and TRUTH_ACCOUNT_ID and str(TRUTH_ACCOUNT_ID).isdigit():
+        try:
+            url = f"https://truthsocial.com/api/v1/accounts/{TRUTH_ACCOUNT_ID}/statuses?exclude_replies=true&with_muted=true&limit={int(limit)}"
+            req = Request(url, headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
+                "Accept": "application/json, text/plain, */*",
+                "Accept-Language": "en-US,en;q=0.9",
+                "Origin": "https://truthsocial.com",
+                "Referer": f"https://truthsocial.com/@{TRUTH_USERNAME}",
+                "Cookie": TRUTH_COOKIE,
+            })
+            print(f"CookieAPI request: {url}")
+            with urlopen(req, timeout=20) as resp:
+                body = resp.read()
+                items = json.loads(body)
+            print(f"CookieAPI fetched items: {len(items) if isinstance(items, list) else 0}")
+            processed_ids = load_processed_posts()
+            new_posts_count = 0
+            alerts_empty = True
+            try:
+                if os.path.exists(ALERTS_FILE):
+                    with open(ALERTS_FILE, "r") as f:
+                        arr = json.load(f)
+                        alerts_empty = not bool(arr)
+            except Exception:
+                alerts_empty = True
+            print(f"CookieAPI alerts_empty={alerts_empty} processed_ids={len(processed_ids)}")
+            for post in items or []:
+                post_id = str(post.get("id") or "").strip()
+                content_html = post.get("content") or ""
+                content = re.sub(r"<[^>]+>", " ", content_html)
+                content = re.sub(r"\s+", " ", content).strip()
+                keywords = extract_keywords(content)
+                ai_result = analyze_with_ai(content)
+                created_iso = post.get("created_at") or datetime.now(timezone.utc).isoformat()
+                url = post.get("url") or "https://truthsocial.com/@realDonaldTrump"
+                if alerts_empty:
+                    save_alert({"id": post_id or f"api_{int(time.time())}", "content": content, "created_at": created_iso, "url": url, "media_attachments": post.get("media_attachments", [])}, keywords, ai_result, source="real")
+                    if post_id:
+                        processed_ids.add(post_id)
+                    new_posts_count += 1
+                else:
+                    if post_id and post_id not in processed_ids:
+                        save_alert({"id": post_id, "content": content, "created_at": created_iso, "url": url, "media_attachments": post.get("media_attachments", [])}, keywords, ai_result, source="real")
+                        processed_ids.add(post_id)
+                        new_posts_count += 1
+            save_processed_posts(processed_ids)
+            print(f"CookieAPI wrote alerts: {new_posts_count}")
+            return new_posts_count
+        except Exception as e:
+            print(f"CookieAPI error: {e}")
+    return 0
 
 def purge_simulated_alerts():
     if not os.path.exists(ALERTS_FILE):

@@ -172,11 +172,42 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+st.markdown("""
+<script>
+(function(){
+function fmt(iso){
+  try{
+    const d = new Date(iso);
+    return d.toLocaleString([], {year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'});
+  }catch(e){return iso}
+}
+function tzLabel(){
+  try{
+    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || '';
+    const offMin = new Date().getTimezoneOffset();
+    const sign = offMin<=0?'+':'-';
+    const pad = (n)=>String(Math.floor(Math.abs(n))).padStart(2,'0');
+    const h = pad(offMin/60);
+    const m = pad(offMin%60);
+    return (tz?tz:'Local')+' UTC'+sign+h+':'+m;
+  }catch(e){return 'Local'}
+}
+document.addEventListener('DOMContentLoaded', function(){
+  document.querySelectorAll('.ts').forEach(function(el){
+    const iso = el.getAttribute('data-iso');
+    if(!iso) return;
+    el.textContent = fmt(iso)+' ('+tzLabel()+')';
+  });
+});
+})();
+</script>
+""", unsafe_allow_html=True)
+
 # ==========================================
 # 3. DATA LOADING
 # ==========================================
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-PROJECT_ROOT = SCRIPT_DIR
+PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
 ALERTS_FILE = os.path.join(PROJECT_ROOT, "market_alerts.json")
 
 # Base64 encoded alarm sound (short beep)
@@ -213,6 +244,35 @@ def inject_stock_tooltips(text, assets):
         sym = m.group(1)
         return f"<span class=\"stock-tooltip\">{sym}<div class=\"tooltip-content\">{get_chart_image_html(sym)}</div><div class=\"tooltip-arrow\"></div></span>"
     return re.sub(pattern, _repl, text, flags=re.IGNORECASE)
+
+def build_media_html(media, max_images=4, width=220):
+    try:
+        if not media:
+            return ""
+        imgs = []
+        cnt = 0
+        for m in media:
+            if cnt >= int(max_images):
+                break
+            src = m.get("preview_url") or m.get("url")
+            if not src:
+                continue
+            imgs.append(f'<img src="{src}" alt="" style="max-width:{int(width)}px; border-radius:8px; border:1px solid #E2E8F0;" onerror="this.style.display=\'none\';" />')
+            cnt += 1
+        if not imgs:
+            return ""
+        return '<div style="margin-top:12px; display:flex; gap:8px; flex-wrap:wrap;">' + ''.join(imgs) + '</div>'
+    except Exception:
+        return ""
+
+def build_time_html(iso_str):
+    try:
+        if not iso_str:
+            return ""
+        s = iso_str.replace('Z', '+00:00')
+        return f'<span class="ts" data-iso="{s}"></span>'
+    except Exception:
+        return f'<span class="ts" data-iso="{iso_str}"></span>'
 
 def load_alerts():
     if not os.path.exists(ALERTS_FILE):
@@ -268,18 +328,25 @@ def pick_ts_str(alert):
     return alert.get('created_at') or alert.get('createdAt') or alert.get('detected_at') or ''
 
 alerts = load_alerts()
-try:
-    from monitor_trump import purge_simulated_alerts
-    removed = purge_simulated_alerts()
-    if removed:
-        alerts = load_alerts()
-except Exception:
-    pass
 if not alerts:
     try:
-        from monitor_trump import run_fetch_recent
+        from monitor_trump import run_fetch_recent, generate_simulated_post, extract_keywords, analyze_with_ai
         run_fetch_recent(limit=20)
         alerts = load_alerts()
+        if not alerts:
+            p = generate_simulated_post()
+            content = p.get("content")
+            keywords = extract_keywords(content)
+            ai_result = analyze_with_ai(content)
+            try:
+                with open(ALERTS_FILE, "r") as f:
+                    arr = json.load(f)
+            except Exception:
+                arr = []
+            arr.insert(0, {"id": p.get("id"), "content": content, "created_at": p.get("created_at"), "url": p.get("url"), "ai_analysis": ai_result, "source": "simulated"})
+            with open(ALERTS_FILE, "w") as f:
+                json.dump(arr, f, indent=2, ensure_ascii=False)
+            alerts = load_alerts()
     except Exception:
         alerts = []
 
@@ -287,8 +354,8 @@ if 'last_api_check' not in st.session_state:
     st.session_state['last_api_check'] = time.time()
 if time.time() - float(st.session_state['last_api_check']) >= float(st.session_state.get('check_interval_seconds', 900)):
     try:
-        from monitor_trump import run_one_check
-        run_one_check()
+        from monitor_trump import run_fetch_recent
+        run_fetch_recent(limit=1)
     except Exception:
         pass
     finally:
@@ -328,6 +395,7 @@ with c_header:
 
 with c_control:
     st.markdown("**⚙️ System Control**")
+    refresh_rate = st.slider("Auto-refresh (sec)", 5, 60, 10)
     fetch_interval_min = st.slider("Fetch interval (min)", 5, 120, 30)
     st.session_state['check_interval_seconds'] = int(fetch_interval_min * 60)
     _now_local = datetime.now(timezone.utc).astimezone()
@@ -387,15 +455,6 @@ if alerts:
 
     st.markdown("<br>", unsafe_allow_html=True)
     latest_time_str = pick_ts_str(latest)
-    try:
-        ts = datetime.fromisoformat(latest_time_str.replace('Z','+00:00'))
-        if ts.tzinfo is None:
-            ts = ts.replace(tzinfo=timezone.utc)
-        age_min = int((datetime.now(timezone.utc) - ts.astimezone(timezone.utc)).total_seconds() / 60)
-        if age_min > 60:
-            st.warning(f"Data age {age_min} min")
-    except Exception:
-        pass
 
     # HERO SECTION (Latest Post)
     latest_ai = latest.get('ai_analysis', {})
@@ -424,9 +483,10 @@ if alerts:
 {'🚨 HIGH MARKET IMPACT' if is_high_impact else '✅ LOW IMPACT'}
 </span>
 <span class="tag tag-gray">{'REAL' if latest.get('source','real')=='real' else 'SIMULATED'}</span>
-<span style="color:#64748B; font-size:12px;">{to_local_str(pick_ts_str(latest))} ({local_tz_label()})</span>
+<span style="color:#64748B; font-size:12px;">{build_time_html(pick_ts_str(latest))}</span>
 </div>
 <div class="post-content">“{latest.get('content','')}”</div>
+{build_media_html(latest.get('media'), 4, 220)}
 {rec_html}
 <div style="margin-top:16px; padding-top:16px; border-top:1px solid #E2E8F0;">
 <div style="font-weight:600; font-size:14px; color:#475569; margin-bottom:4px;">🤖 AI Analyst Notes:</div>
@@ -447,7 +507,7 @@ if alerts:
         ai = alert.get('ai_analysis', {})
         is_high = ai.get('impact', False)
         impact_class = "hero-alert-high" if is_high else "hero-alert-low"
-        ts_disp = to_local_str(pick_ts_str(alert))
+        ts_disp = build_time_html(pick_ts_str(alert))
         rec = ai.get('recommendation', 'None')
         assets = ai.get('affected_assets', [])
         rec_html = ""
@@ -465,9 +525,10 @@ if alerts:
 <div style=\"display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;\">
 <span class=\"tag {'tag-red' if is_high else 'tag-green'}\">{'🚨 HIGH MARKET IMPACT' if is_high else '✅ LOW IMPACT'}</span>
 <span class=\"tag tag-gray\">{'REAL' if alert.get('source','real')=='real' else 'SIMULATED'}</span>
-<span style=\"color:#64748B; font-size:12px;\">{ts_disp} ({local_tz_label()})</span>
+<span style=\"color:#64748B; font-size:12px;\">{ts_disp}</span>
 </div>
 <div class=\"post-content\">“{alert.get('content','')}”</div>
+{build_media_html(alert.get('media'), 3, 180)}
 {rec_html}
 <div style=\"margin-top:16px; padding-top:16px; border-top:1px solid #E2E8F0;\">
 <div style=\"font-weight:600; font-size:14px; color:#475569; margin-bottom:4px;\">🤖 AI Analyst Notes:</div>
@@ -479,10 +540,10 @@ if alerts:
         st.divider()
 
     # Historical Data
-    if len(alerts) > 5:
+    if len(alerts) > 6:
         st.markdown("---")
         st.subheader("📚 Post Archive")
-        with st.expander(f"View {len(alerts)-5} older posts", expanded=False):
+        with st.expander(f"View {len(alerts)-6} older posts", expanded=False):
             st.dataframe(
                 pd.DataFrame([
                     {
@@ -493,7 +554,7 @@ if alerts:
                         "AI Reasoning": a.get('ai_analysis', {}).get('reasoning', '-'),
                         "Context Source": a.get('ai_analysis', {}).get('external_context_used', '-')
                     }
-                    for a in alerts[5:]
+                    for a in alerts[6:]
                 ]),
                 width='stretch'
             )
@@ -511,3 +572,7 @@ st.markdown(
     """,
     unsafe_allow_html=True
 )
+
+# Auto-refresh
+time.sleep(refresh_rate)
+st.rerun()
