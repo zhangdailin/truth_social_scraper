@@ -433,6 +433,10 @@ def load_alerts():
 alerts = load_alerts()
 if 'initial_fetch_done' not in st.session_state:
     st.session_state['initial_fetch_done'] = False
+if 'fetch_interval_min' not in st.session_state:
+    st.session_state['fetch_interval_min'] = 30
+if 'refresh_rate_sec' not in st.session_state:
+    st.session_state['refresh_rate_sec'] = 10
 if not alerts and not st.session_state['initial_fetch_done']:
     try:
         from monitor_trump import run_fetch_recent
@@ -489,8 +493,14 @@ with c_header:
 
 with c_control:
     st.markdown("**⚙️ System Control**")
-    refresh_rate = st.slider("Auto-refresh (sec)", 5, 60, 10)
-    fetch_interval_min = st.slider("Fetch interval (min)", 5, 120, 30)
+    refresh_rate = st.slider(
+        "Auto-refresh (sec)", 5, 60, int(st.session_state.get("refresh_rate_sec", 10))
+    )
+    fetch_interval_min = st.slider(
+        "Fetch interval (min)", 5, 120, int(st.session_state.get("fetch_interval_min", 30))
+    )
+    st.session_state['refresh_rate_sec'] = int(refresh_rate)
+    st.session_state['fetch_interval_min'] = int(fetch_interval_min)
     st.session_state['check_interval_seconds'] = int(fetch_interval_min * 60)
     _now_local = datetime.now(timezone.utc).astimezone()
     _tz_label = local_tz_label()

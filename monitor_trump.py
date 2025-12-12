@@ -1,6 +1,7 @@
 import os
 import json
 import re
+import time
 from datetime import datetime, timezone
 from openai import OpenAI
 from urllib.request import Request, urlopen
@@ -19,6 +20,8 @@ from utils import (
 # ==========================================
 # Determine paths relative to repo root
 PROCESSED_LOG_FILE = os.path.join(PROJECT_ROOT, "processed_posts.json")
+# 保留的最大告警条数，None 表示不截断
+MAX_ALERTS = None
 
 # SiliconFlow API Configuration
 SILICONFLOW_API_KEY = os.getenv("SILICONFLOW_API_KEY")
@@ -137,7 +140,7 @@ def get_recent_posts_context(limit=3):
         return "No recent posts available."
     return "No recent posts available."
 
-def analyze_with_ai(post_content, media=None):
+def analyze_with_ai(post_content, media=None, retries=2, backoff=1.5):
     """
     Analyzes the post content using DeepSeek model via SiliconFlow API.
     Returns a dictionary with analysis results.
@@ -232,43 +235,50 @@ def analyze_with_ai(post_content, media=None):
     }}
     """
 
-    try:
-        response = client.chat.completions.create(
-            model="deepseek-ai/DeepSeek-V3", 
-            messages=[
-                {"role": "system", "content": "You are a helpful financial assistant. You output valid JSON only."},
-                {"role": "user", "content": prompt}
-            ],
-            response_format={"type": "json_object"},
-            temperature=0.3,
-            max_tokens=500
-        )
-        
-        result_text = response.choices[0].message.content
-        result_json = json.loads(result_text)
-        
-        # Inject external context summary into the result for transparency
-        context_preview = "No external news found."
-        if "No related external news found" not in external_context:
-            match = re.search(r'\[News\] (.*?):', external_context)
-            if match:
-                context_preview = f"News Context: {match.group(1)}..."
-            else:
-                context_preview = "External market data used."
-        
-        result_json['external_context_used'] = context_preview
-        result_json['media_used'] = bool(media_context and media_context != "No media attached.")
-        result_json['media_caption_used'] = bool(caption_text)
-        
-        return result_json
+    last_err = None
+    for attempt in range(int(retries) + 1):
+        try:
+            response = client.chat.completions.create(
+                model="deepseek-ai/DeepSeek-V3",
+                messages=[
+                    {"role": "system", "content": "You are a helpful financial assistant. You output valid JSON only."},
+                    {"role": "user", "content": prompt}
+                ],
+                response_format={"type": "json_object"},
+                temperature=0.3,
+                max_tokens=500
+            )
+            
+            result_text = response.choices[0].message.content
+            result_json = json.loads(result_text)
+            
+            # Inject external context summary into the result for transparency
+            context_preview = "No external news found."
+            if "No related external news found" not in external_context:
+                match = re.search(r'\[News\] (.*?):', external_context)
+                if match:
+                    context_preview = f"News Context: {match.group(1)}..."
+                else:
+                    context_preview = "External market data used."
+            
+            result_json['external_context_used'] = context_preview
+            result_json['media_used'] = bool(media_context and media_context != "No media attached.")
+            result_json['media_caption_used'] = bool(caption_text)
+            
+            return result_json
+        except Exception as e:
+            last_err = e
+            print(f"AI Analysis Failed attempt {attempt+1}/{int(retries)+1}: {e}")
+            if attempt < int(retries):
+                time.sleep(backoff * (attempt + 1))
+                continue
+            break
 
-    except Exception as e:
-        print(f"AI Analysis Failed: {e}")
-        return {
-            "error": str(e),
-            "impact": False,
-            "summary": "AI Analysis Failed."
-        }
+    return {
+        "error": str(last_err),
+        "impact": False,
+        "summary": "AI Analysis Failed after retries."
+    }
 
 # ==========================================
 # MONITORING FUNCTIONS
@@ -345,8 +355,9 @@ def save_alert(post, keywords, ai_analysis=None, source=None):
     # Add new alert to the beginning
     alerts.insert(0, alert_data)
     
-    # Keep only last 100 alerts
-    alerts = alerts[:100]
+    # Keep only last N alerts if MAX_ALERTS is set
+    if MAX_ALERTS:
+        alerts = alerts[:int(MAX_ALERTS)]
 
     with open(ALERTS_FILE, "w") as f:
         json.dump(alerts, f, indent=2, ensure_ascii=False)
@@ -374,7 +385,17 @@ def run_fetch_recent(limit=20, fast_init=False):
     new_posts_count = 0
     print(f"CookieAPI alerts_empty={alerts_empty} processed_ids={len(processed_ids)}")
 
-    for post in items or []:
+    # 按创建时间倒序，确保先处理最新的帖子
+    def _created_ts(p):
+        ts = p.get("created_at") or p.get("createdAt") or ""
+        try:
+            return datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+        except Exception:
+            return datetime.min
+
+    sorted_items = sorted(items or [], key=_created_ts, reverse=True)
+
+    for post in sorted_items:
         post_id = str(post.get("id") or "").strip()
         media_atts = post.get("media_attachments", [])
         media = extract_media(media_atts)
@@ -404,19 +425,5 @@ def run_fetch_recent(limit=20, fast_init=False):
     save_processed_posts(processed_ids)
     print(f"CookieAPI wrote alerts: {new_posts_count}")
     return new_posts_count
-
-def purge_simulated_alerts():
-    if not os.path.exists(ALERTS_FILE):
-        return 0
-    try:
-        with open(ALERTS_FILE, "r") as f:
-            data = json.load(f)
-        filtered = [a for a in data if str(a.get("source", "real")) != "simulated"]
-        removed = len(data) - len(filtered)
-        with open(ALERTS_FILE, "w") as f:
-            json.dump(filtered, f, indent=2, ensure_ascii=False)
-        return removed
-    except Exception:
-        return 0
 
  

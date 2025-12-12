@@ -45,7 +45,6 @@ streamlit run dashboard.py
 - Truth Social Cookie API：
   - 使用 `monitor_trump.py` 中的 `fetch_truth_posts` 直接访问 Truth Social 公开接口
   - 需提供有效的 `TRUTH_COOKIE`，账号 ID/用户名可保持默认 `realDonaldTrump`
-- 抓取时默认会从 GitHub 免费代理列表尝试若干代理，再回退直连，无需配置代理环境变量
 - 首次加载与定时抓取：
   - 页面初次无数据时尝试拉取最近数据 `run_fetch_recent`
   - 后续按 `Fetch interval (min)` 定时调用 `run_one_check`
