@@ -1,4 +1,19 @@
 streamlit>=1.28.0
 pandas>=2.0.0
 openai>=1.0.0
-
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+python-dotenv>=1.0.0
+pysocks>=1.7.1
+httpx[socks]>=0.24.0
+requests>=2.31.0
+opencv-python-headless>=4.8.0
+transformers>=4.40.0
+Pillow>=10.0.0
+torch>=2.1.0
+huggingface_hub>=0.22.0
+streamlit-autorefresh>=0.0.6
+# OCR 功能说明：
+# - OCR 仅通过 HuggingFace API 实现，需要设置 HUGGINGFACE_API_KEY 环境变量
+# - 不使用本地 OCR 模型（性能要求过高）
+# - transformers 和 torch 用于其他功能（如图片描述），不用于 OCR
