@@ -24,6 +24,12 @@ from utils import (
     get_media_paths_by_post_id,
 )
 
+# 简易缓存与跨会话抓取锁（依赖 PROJECT_ROOT，因此放在 utils 导入之后）
+_ALERTS_CACHE = {"mtime": None, "data": None}
+LOCK_DIR = os.path.join(PROJECT_ROOT, ".cursor")
+FETCH_LOCK_FILE = os.path.join(LOCK_DIR, "fetch.lock")
+LOCK_STALE_SECONDS = 240  # 4 分钟后视为陈旧锁
+
 # 加载 .env 文件（在导入其他模块之前）
 load_dotenv()
 
@@ -291,213 +297,68 @@ st.set_page_config(
     initial_sidebar_state="collapsed"
 )
 
-# ==========================================
-# 2. CUSTOM CSS STYLING
-# ==========================================
 st.markdown("""
 <style>
     html, body, [class*="css"] {
-        font-family: system-ui, -apple-system, "Segoe UI", Roboto, Ubuntu, Cantarell, "Noto Sans", Helvetica, Arial, sans-serif;
+        background: #F8FAFC;
+        color: #0F172A;
+        font-family: "Inter", "Segoe UI", system-ui, -apple-system, sans-serif;
     }
-    
-    /* Reduce top padding to minimize empty space */
-    .block-container {
-        padding-top: 3.5rem !important;
-        padding-bottom: 0rem !important;
-        max-width: 95% !important;
-    }
-    
-    /* Compact header */
-    h1 {
-        padding-top: 0rem !important;
-        margin-bottom: 0.5rem !important;
-    }
-    
-    h1, h2, h3 {
-        font-weight: 600;
-        color: #1E293B;
-    }
-
-    hr {
-        margin: 6px 0 !important;
-        border-top: 1px solid #E2E8F0 !important;
-    }
+    .block-container { padding-top: 2.0rem !important; padding-bottom: 0 !important; max-width: 94% !important; }
+    h1, h2, h3 { color: #0F172A; font-weight: 700; letter-spacing: -0.01em; }
+    h1 { margin-bottom: 0.4rem !important; }
+    hr { margin: 8px 0 !important; border-top: 1px solid #E2E8F0 !important; }
 
     /* Metric Cards */
     .metric-container {
-        background-color: #FFFFFF;
+        background: #FFFFFF;
         border: 1px solid #E2E8F0;
-        border-radius: 8px;
-        padding: 16px;
+        border-radius: 10px;
+        padding: 14px;
         text-align: center;
-        box-shadow: 0 1px 2px rgba(0,0,0,0.05);
+        box-shadow: 0 2px 8px rgba(15, 23, 42, 0.05);
     }
-    .metric-value {
-        font-size: 24px;
-        font-weight: 700;
-        color: #0F172A;
-    }
-    .metric-label {
-        font-size: 12px;
-        color: #64748B;
-        text-transform: uppercase;
-        letter-spacing: 0.5px;
-    }
+    .metric-value { font-size: 22px; font-weight: 800; color: #0F172A; }
+    .metric-label { font-size: 11px; color: #64748B; letter-spacing: 0.5px; text-transform: uppercase; }
 
     /* Hero Card (Latest Post) */
     .hero-card {
-        background: linear-gradient(135deg, #F8FAFC 0%, #EFF6FF 100%);
-        border: 1px solid #CBD5E1;
+        background: #FFFFFF;
+        border: 1px solid #E2E8F0;
         border-radius: 12px;
-        padding: 24px;
-        margin-bottom: 24px;
-        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+        padding: 18px;
+        margin-bottom: 18px;
+        box-shadow: 0 6px 16px rgba(15, 23, 42, 0.07);
     }
-    .hero-alert-high {
-        border-left: 6px solid #EF4444;
-    }
-    .hero-alert-low {
-        border-left: 6px solid #10B981;
-    }
-    
-    .post-content {
-        font-family: 'Georgia', serif;
-        font-size: 20px;
-        line-height: 1.5;
-        color: #334155;
-        margin-bottom: 16px;
-    }
-    
-    /* Feed Item */
-    .feed-item {
-        background-color: white;
-        border-radius: 8px;
-        padding: 16px;
-        margin-bottom: 12px;
-        border: 1px solid #F1F5F9;
-        transition: transform 0.2s;
-    }
-    .feed-item:hover {
-        background-color: #F8FAFC;
-        border-color: #E2E8F0;
-    }
-    
+    .hero-alert-high { border-left: 6px solid #EF4444; }
+    .hero-alert-low  { border-left: 6px solid #10B981; }
+    .post-content { font-size: 18px; line-height: 1.55; color: #1F2937; margin-bottom: 12px; }
+
+    /* Feed */
+    .feed-item { background: #fff; border-radius: 10px; padding: 14px; border: 1px solid #E5E7EB; margin-bottom: 10px; box-shadow: 0 4px 12px rgba(15, 23, 42, 0.06); }
+    .feed-item + .feed-item { margin-top: 10px; }
+
     /* Tags */
-    .tag {
-        display: inline-block;
-        padding: 2px 8px;
-        border-radius: 4px;
-        font-size: 11px;
-        font-weight: 600;
-        margin-right: 6px;
-    }
+    .tag { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 700; margin-right: 6px; }
     .tag-red { background-color: #FEF2F2; color: #DC2626; border: 1px solid #FECACA; }
     .tag-green { background-color: #ECFDF5; color: #059669; border: 1px solid #A7F3D0; }
     .tag-gray { background-color: #F1F5F9; color: #475569; border: 1px solid #E2E8F0; }
 
-    /* Media grid */
-    .media-grid {
-        margin-top: 12px;
-        margin-bottom: 16px;
-        display: grid;
-        gap: 10px;
-        grid-template-columns: repeat(auto-fit, minmax(var(--media-min, 180px), 1fr));
-        clear: both;
-    }
-    .media-item {
-        position: relative;
-        overflow: hidden;
-        border-radius: 10px;
-        border: 1px solid #E2E8F0;
-        background: #0F172A;
-        min-height: 140px;
-        max-width: 500px;
-        isolation: isolate; /* 创建新的层叠上下文，防止样式泄露 */
-    }
-    .media-item img,
-    .media-item video {
-        width: 100%;
-        height: auto;
-        object-fit: cover;
-        display: block;
-        background: #0F172A;
-    }
-    .media-item video {
-        max-height: 300px;
-        max-width: 100%;
-        aspect-ratio: 16 / 9;
-    }
-    .media-item img {
-        aspect-ratio: 4 / 3;
-        max-height: 400px;
-    }
-    .media-more {
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        color: #1E293B;
-        background: linear-gradient(135deg, #E2E8F0, #CBD5E1);
-        font-weight: 700;
-        font-size: 18px;
-        gap: 6px;
-    }
-    .media-more span {
-        font-size: 12px;
-        color: #475569;
-        font-weight: 600;
-        text-transform: uppercase;
-        letter-spacing: 0.5px;
-    }
+    /* Media */
+    .media-grid { margin-top: 10px; margin-bottom: 12px; display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(var(--media-min, 180px), 1fr)); clear: both; }
+    .media-item { position: relative; overflow: hidden; border-radius: 10px; border: 1px solid #E2E8F0; background: #0F172A; min-height: 140px; max-width: 520px; box-shadow: 0 6px 14px rgba(15, 23, 42, 0.12); }
+    .media-item img, .media-item video { width: 100%; height: auto; object-fit: cover; display: block; background: #0F172A; }
+    .media-item video { max-height: 260px; aspect-ratio: 16 / 9; }
+    .media-item img { aspect-ratio: 4 / 3; max-height: 340px; }
+    .media-more { display: flex; align-items: center; justify-content: center; color: #1F2937; background: #E5E7EB; font-weight: 800; font-size: 16px; gap: 6px; }
+    .media-more span { font-size: 12px; color: #475569; font-weight: 600; letter-spacing: 0.5px; }
 
     /* Stock Tooltip */
-    .stock-tooltip {
-        position: relative;
-        display: inline-block;
-        border-bottom: 2px dashed #F59E0B;
-        cursor: help;
-        font-weight: bold;
-    }
-    
-    .stock-tooltip .tooltip-content {
-        visibility: hidden;
-        width: 500px;
-        height: auto;
-        background-color: #ffffff;
-        text-align: center;
-        border-radius: 8px;
-        padding: 8px;
-        position: absolute;
-        z-index: 99999;
-        top: 130%;
-        left: 50%;
-        margin-left: -250px;
-        opacity: 0;
-        transition: opacity 0.2s;
-        box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
-        border: 1px solid #E2E8F0;
-    }
-    
-    .stock-tooltip:hover .tooltip-content {
-        visibility: visible;
-        opacity: 1;
-    }
-    
-    .tooltip-image {
-        width: 100%;
-        height: auto;
-        border-radius: 4px;
-    }
-    
-    .stock-tooltip .tooltip-arrow {
-        position: absolute;
-        bottom: 100%;
-        left: 50%;
-        margin-left: -5px;
-        border-width: 5px;
-        border-style: solid;
-        border-color: transparent transparent #E2E8F0 transparent;
-    }
-
+    .stock-tooltip { position: relative; display: inline-block; border-bottom: 2px dashed #F59E0B; cursor: help; font-weight: 700; color: #0F172A; }
+    .stock-tooltip .tooltip-content { visibility: hidden; width: 420px; background: #ffffff; text-align: center; border-radius: 10px; padding: 10px; position: absolute; z-index: 99999; top: 130%; left: 50%; margin-left: -210px; opacity: 0; transition: opacity 0.2s; box-shadow: 0 12px 24px rgba(15, 23, 42, 0.16); border: 1px solid #E2E8F0; color: #1F2937;}
+    .stock-tooltip:hover .tooltip-content { visibility: visible; opacity: 1; }
+    .tooltip-image { width: 100%; height: auto; border-radius: 6px; }
+    .stock-tooltip .tooltip-arrow { position: absolute; bottom: 100%; left: 50%; margin-left: -5px; border-width: 5px; border-style: solid; border-color: transparent transparent #E2E8F0 transparent; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -632,96 +493,36 @@ def build_media_html(media, max_images=4, width=220, post_id=None):
                 if not os.path.exists(local_path):
                     continue
                 
-                # 转换为相对路径和API路径
                 try:
                     rel_path = os.path.relpath(local_path, MEDIA_DIR)
-                    rel_path_normalized = rel_path.replace('\\', '/')
-                    # 移除前导斜杠（API路径不需要）
-                    rel_path_normalized = rel_path_normalized.lstrip('/')
-                    # 构建API路径
+                    rel_path_normalized = rel_path.replace('\\', '/').lstrip('/')
                     api_path = f"{api_base_url}/api/media/{rel_path_normalized}"
-                    
-                    
-                    
-                    # 判断是视频还是图片
                     is_video = any(ext in local_path.lower() for ext in ['.mp4', '.webm', '.mov', '.avi', '.mkv'])
-                    
-                    # 如果有视频，跳过预览图（图片文件）
                     if has_video and not is_video:
                         continue
-                    
                     if is_video:
-                        # 使用简化的视频播放器（避免复杂的script导致渲染问题）
-                        video_id = f"plyr-video-{hashlib.md5(api_path.encode()).hexdigest()[:8]}"
-                        video_html = f'''<div class="media-item" style="position: relative; margin-bottom: 10px; max-width: 500px; isolation: isolate; clear: both; cursor: zoom-in;" onclick="openMediaModal_{post_id}('video','{api_path}')">
-                            <video id="{video_id}" playsinline controls crossorigin="anonymous" style="width: 100%; max-height: 300px; display: block; margin: 0; padding: 0;">
-                                <source src="{api_path}" type="video/mp4">
-                            </video>
-                            <div style="position: absolute; top: 5px; right: 5px; z-index: 10;">
-                                <a href="{api_path}" download style="background: rgba(0,0,0,0.7); color: white; padding: 5px 10px; border-radius: 3px; text-decoration: none; font-size: 12px; display: inline-block;">⬇ 下载</a>
-                            </div>
-                        </div>
-                        <script>
-                        (function() {{
-                            try {{
-                                if (typeof Plyr !== 'undefined') {{
-                                    const player = new Plyr('#{video_id}', {{
-                                        controls: ['play-large', 'play', 'progress', 'current-time', 'mute', 'volume', 'settings', 'fullscreen'],
-                                        settings: ['speed'],
-                                        speed: {{selected: 1, options: [0.5, 0.75, 1, 1.25, 1.5, 1.75, 2]}},
-                                        keyboard: {{focused: true, global: false}},
-                                        clickToPlay: true
-                                    }});
-                                }}
-                            }} catch(e) {{
-                                console.warn('Plyr initialization failed:', e);
-                            }}
-                        }})();
-                        </script>'''
-                        items.append(video_html)
+                        items.append(
+                            f'<div class="media-item" style="position: relative; margin-bottom: 8px;">'
+                            f'<video playsinline controls crossorigin="anonymous" style="width: 100%; max-height: 280px; display: block;">'
+                            f'<source src="{api_path}" type="video/mp4"></video>'
+                            f'<div style="position: absolute; top: 6px; right: 6px; z-index: 10;">'
+                            f'<a href="{api_path}" download style="background: rgba(0,0,0,0.65); color: white; padding: 4px 8px; border-radius: 4px; text-decoration: none; font-size: 11px;">⬇ 下载</a>'
+                            f'</div></div>'
+                        )
                     else:
                         items.append(
-                            f"<div class=\"media-item\" style=\"cursor: zoom-in;\" onclick='openMediaModal_{post_id}(\"image\", \"{api_path}\")'>"
-                            f"<img src=\"{api_path}\" alt=\"\" loading=\"lazy\" decoding=\"async\" {img_onerror} />"
-                            "</div>"
+                            f'<div class="media-item" style="cursor: zoom-in;">'
+                            f'<img src="{api_path}" alt="" loading="lazy" decoding="async" {img_onerror} />'
+                            f'</div>'
                         )
-                except Exception as e:
+                except Exception:
                     continue
             
-            # 如果通过推文ID找到了本地文件，直接返回，不再处理media列表（避免重复）
             if items:
-                # 使用实际应该显示的媒体数量来计算剩余数量（排除被跳过的预览图）
                 remaining = max(0, displayable_count - len(items))
                 if remaining > 0:
                     items.append(f'<div class="media-item media-more">+{remaining} <span>more</span></div>')
-                modal = f'''
-                <div id="media-modal-{post_id}" class="media-modal" style="display:none; position:fixed; z-index:1000; left:0; top:0; width:100%; height:100%; background:rgba(0,0,0,0.75);">
-                  <div class="media-modal-content" style="position:relative; margin:40px auto; max-width:90%; max-height:85%; background:#000; border-radius:8px; padding:10px;">
-                    <span onclick="closeMediaModal_{post_id}()" style="position:absolute; right:10px; top:6px; color:#fff; font-size:24px; cursor:pointer;">×</span>
-                    <img id="media-modal-img-{post_id}" src="" style="display:none; max-width:100%; max-height:80vh;"/>
-                    <video id="media-modal-video-{post_id}" controls style="display:none; width:100%; max-height:80vh; background:#000;"><source id="media-modal-video-src-{post_id}" src="" type="video/mp4"></video>
-                  </div>
-                </div>
-                <script>
-                function openMediaModal_{post_id}(type, src) {{
-                  var m = document.getElementById('media-modal-{post_id}');
-                  var img = document.getElementById('media-modal-img-{post_id}');
-                  var vid = document.getElementById('media-modal-video-{post_id}');
-                  var vsrc = document.getElementById('media-modal-video-src-{post_id}');
-                  if (type === 'image') {{
-                    img.style.display='block'; vid.style.display='none'; img.src=src;
-                  }} else {{
-                    img.style.display='none'; vid.style.display='block'; vsrc.src=src; vid.load();
-                  }}
-                  m.style.display='block';
-                }}
-                function closeMediaModal_{post_id}() {{
-                  var m = document.getElementById('media-modal-{post_id}');
-                  m.style.display='none';
-                }}
-                </script>
-                '''
-                return f'<div id="media-grid-{post_id}" class="media-grid" style="--media-min:{min_col}px;">' + ''.join(items) + '</div>' + modal
+                return f'<div id="media-grid-{post_id}" class="media-grid" style="--media-min:{min_col}px;">' + ''.join(items) + '</div>'
         
         # 如果没有通过推文ID找到本地文件，使用media列表中的URL（向后兼容）
         if not local_media_paths:
@@ -737,6 +538,7 @@ def build_media_html(media, max_images=4, width=220, post_id=None):
             
             # 计算实际应该显示的媒体数量（排除被跳过的预览图）
             displayable_count = 0
+            filtered_media = []
             for m in media:
                 vsrc_check = m.get("url") or m.get("remote_url") or ""
                 poster_check = m.get("preview_url") or ""
@@ -747,9 +549,10 @@ def build_media_html(media, max_images=4, width=220, post_id=None):
                     continue
                 # 如果有有效的媒体源，计入可显示数量
                 if (is_video_check and vsrc_check) or (poster_check or vsrc_check):
+                    filtered_media.append(m)
                     displayable_count += 1
             
-            for m in media:
+            for m in filtered_media:
                 if len(items) >= max_images:
                     break
                 
@@ -1039,6 +842,9 @@ def render_alert_card(alert, latest=False):
 <summary style="cursor:pointer; color:#334155; font-size:12px; font-weight:600;">AI Context Details</summary>
 <div style="padding:8px; border:1px dashed #CBD5E1; border-radius:6px; margin-top:6px;">
 <div style="font-size:12px; color:#64748B; line-height:1.6; padding:8px; background-color:#F8FAFC; border-radius:4px; margin-bottom:8px;"><strong>🖼️ Media:</strong><br/>{ai.get('media_ai_summary','').strip() or '<em style="color:#94A3B8;">No media analysis available.</em>'}</div>
+<div style="font-size:12px; color:#64748B; line-height:1.6; padding:8px; background-color:#F8FAFC; border-radius:4px;">
+<strong>🌐 External Context:</strong><br/>{(ai.get('external_context_used','') or '').strip().replace(' | ','<br/>') or '<em style="color:#94A3B8;">No external context.</em>'}
+</div>
 </div>
 </details>
 </div>
@@ -1217,9 +1023,46 @@ def _save_alerts_back(alerts_to_save):
         import traceback
         traceback.print_exc()
 
+def _acquire_fetch_lock():
+    """跨会话文件锁，避免多实例/多用户并发抓取造成重复请求。"""
+    try:
+        os.makedirs(LOCK_DIR, exist_ok=True)
+        ts = str(time.time())
+        # 尝试创建锁文件；存在则视为被占用
+        fd = os.open(FETCH_LOCK_FILE, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        with os.fdopen(fd, "w") as f:
+            f.write(ts)
+        return True
+    except FileExistsError:
+        try:
+            mtime = os.path.getmtime(FETCH_LOCK_FILE)
+            if time.time() - mtime > LOCK_STALE_SECONDS:
+                os.remove(FETCH_LOCK_FILE)
+                return _acquire_fetch_lock()
+        except Exception:
+            pass
+        return False
+    except Exception:
+        return False
+
+def _release_fetch_lock():
+    try:
+        if os.path.exists(FETCH_LOCK_FILE):
+            os.remove(FETCH_LOCK_FILE)
+    except Exception:
+        pass
+
 def load_alerts():
     if not os.path.exists(ALERTS_FILE):
         return []
+    
+    # mtime 缓存，避免高频重复解析
+    try:
+        mtime = os.path.getmtime(ALERTS_FILE)
+        if _ALERTS_CACHE["mtime"] == mtime and _ALERTS_CACHE["data"] is not None:
+            return _ALERTS_CACHE["data"]
+    except Exception:
+        pass
     
     # 尝试多种编码格式
     encodings = ['utf-8', 'utf-8-sig', 'gbk', 'gb2312', 'latin-1', 'cp1252']
@@ -1315,6 +1158,13 @@ def load_alerts():
             st.session_state['needs_save'] = []  # 清空列表
         except Exception as e:
             pass
+    
+    # 更新缓存
+    try:
+        _ALERTS_CACHE["mtime"] = os.path.getmtime(ALERTS_FILE)
+        _ALERTS_CACHE["data"] = deduped
+    except Exception:
+        pass
     
     return deduped
 
@@ -1620,24 +1470,30 @@ current_time_check = time.time()
 # 使用文件系统的时间戳，确保即使页面刷新也能正确计算时间差
 time_elapsed = current_time_check - last_api_check_timestamp
 if not st.session_state.get('is_fetching', False) and time_elapsed >= check_interval:
-    try:
-        st.session_state['is_fetching'] = True
-        from monitor_trump import run_fetch_recent
-        result = run_fetch_recent(limit=5, fast_init=True)
-    except Exception as e:
-        print(f"Error in scheduled fetch: {e}")
-    finally:
-        # 更新文件系统和session_state中的时间戳
-        new_timestamp = time.time()
-        set_last_api_check(new_timestamp)
-        st.session_state['last_api_check'] = new_timestamp
-        st.session_state['is_fetching'] = False
-        # 重新加载alerts并更新缓存
-        st.session_state['cached_alerts'] = load_alerts()
-        alerts = st.session_state['cached_alerts']
-        # 注意：st.rerun() 已移除，因为它会阻止后续页面渲染代码的执行
-        # 页面会在下一次用户交互或JavaScript自动刷新时更新
-        # 不再调用 st.rerun()，让页面正常渲染，JavaScript会自动刷新
+    lock_acquired = _acquire_fetch_lock()
+    if not lock_acquired:
+        # 另一实例正在抓取，直接跳过本轮，避免重复请求
+        pass
+    else:
+        try:
+            st.session_state['is_fetching'] = True
+            from monitor_trump import run_fetch_recent
+            result = run_fetch_recent(limit=5, fast_init=True)
+        except Exception as e:
+            print(f"Error in scheduled fetch: {e}")
+        finally:
+            # 更新文件系统和session_state中的时间戳
+            new_timestamp = time.time()
+            set_last_api_check(new_timestamp)
+            st.session_state['last_api_check'] = new_timestamp
+            st.session_state['is_fetching'] = False
+            _release_fetch_lock()
+            # 重新加载alerts并更新缓存
+            st.session_state['cached_alerts'] = load_alerts()
+            alerts = st.session_state['cached_alerts']
+            # 注意：st.rerun() 已移除，因为它会阻止后续页面渲染代码的执行
+            # 页面会在下一次用户交互或JavaScript自动刷新时更新
+            # 不再调用 st.rerun()，让页面正常渲染，JavaScript会自动刷新
 
 st.markdown("---")
 
