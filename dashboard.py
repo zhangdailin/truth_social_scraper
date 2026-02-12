@@ -306,16 +306,46 @@ st.set_page_config(
 st.markdown("""
 <style>
     html, body, [class*="css"] {
-        background: #F8FAFC;
+        background: #F4F6FA;
         color: #0F172A;
         font-family: "Inter", "Segoe UI", system-ui, -apple-system, sans-serif;
     }
-    .block-container { padding-top: 2.0rem !important; padding-bottom: 0 !important; max-width: 94% !important; }
+    .block-container { padding-top: 1.2rem !important; padding-bottom: 0 !important; max-width: 98% !important; }
     h1, h2, h3 { color: #0F172A; font-weight: 700; letter-spacing: -0.01em; }
-    h1 { margin-bottom: 0.4rem !important; }
     hr { margin: 8px 0 !important; border-top: 1px solid #E2E8F0 !important; }
 
-    /* Metric Cards */
+    .topbar {
+        background: linear-gradient(120deg, #0b1220 0%, #1d4ed8 60%, #38bdf8 120%);
+        border-radius: 16px;
+        padding: 14px 18px;
+        color: #fff;
+        margin-bottom: 12px;
+        box-shadow: 0 10px 28px rgba(15,23,42,0.18);
+    }
+    .topbar h1 { color: #fff; margin: 0 !important; font-size: 26px; }
+    .topbar p { margin: 6px 0 0 0; color: rgba(255,255,255,0.82); font-size: 13px; }
+
+    .nav-shell {
+        background: #fff;
+        border: 1px solid #dbe4f3;
+        border-radius: 14px;
+        padding: 10px 14px;
+        margin-bottom: 10px;
+        box-shadow: 0 4px 14px rgba(15, 23, 42, 0.05);
+    }
+    .nav-row { display:flex; justify-content:space-between; align-items:center; gap: 10px; flex-wrap: wrap; }
+    .nav-title { font-size: 15px; font-weight: 800; color: #0f172a; }
+    .nav-meta { font-size: 12px; color:#64748b; }
+
+    .filter-shell {
+        background: #ffffff;
+        border: 1px solid #dbe4f3;
+        border-radius: 14px;
+        padding: 10px 12px 4px;
+        margin-bottom: 12px;
+        box-shadow: 0 5px 18px rgba(15, 23, 42, 0.06);
+    }
+
     .metric-container {
         background: #FFFFFF;
         border: 1px solid #E2E8F0;
@@ -327,93 +357,82 @@ st.markdown("""
     .metric-value { font-size: 22px; font-weight: 800; color: #0F172A; }
     .metric-label { font-size: 11px; color: #64748B; letter-spacing: 0.5px; text-transform: uppercase; }
 
-    /* Hero Card (Latest Post) */
-    .hero-card {
-        background: #FFFFFF;
-        border: 1px solid #E2E8F0;
-        border-radius: 12px;
-        padding: 18px;
-        margin-bottom: 18px;
-        box-shadow: 0 6px 16px rgba(15, 23, 42, 0.07);
+    .hero-card, .feed-item {
+        background: #fff;
+        border: 1px solid #dbe4f3;
+        border-radius: 16px;
+        padding: 14px;
+        margin-bottom: 12px;
+        box-shadow: 0 8px 20px rgba(15, 23, 42, 0.06);
     }
-    .hero-alert-high { border-left: 6px solid #EF4444; }
-    .hero-alert-low  { border-left: 6px solid #10B981; }
-    .post-content { font-size: 18px; line-height: 1.55; color: #1F2937; margin-bottom: 12px; }
+    .hero-alert-high { border-left: 5px solid #ef4444; }
+    .hero-alert-low  { border-left: 5px solid #10b981; }
 
-    /* Feed */
-    .feed-item { background: #fff; border-radius: 10px; padding: 14px; border: 1px solid #E5E7EB; margin-bottom: 10px; box-shadow: 0 4px 12px rgba(15, 23, 42, 0.06); }
-    .feed-item + .feed-item { margin-top: 10px; }
+    .feed-head { display:flex; align-items:flex-start; gap:10px; }
+    .avatar {
+        width: 42px; height: 42px; border-radius: 50%; flex-shrink: 0;
+        background: linear-gradient(135deg,#1e293b,#334155);
+        display:flex; align-items:center; justify-content:center; color:#fff; font-weight:800;
+        border: 2px solid #e2e8f0;
+    }
+    .author-line { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+    .author-name { font-weight: 800; color:#0f172a; }
+    .post-time { color:#64748b; font-size:12px; }
+    .post-content { font-size: 16px; line-height: 1.58; color: #1f2937; margin: 10px 0 8px; }
 
-    /* Tags */
-    .tag { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 700; margin-right: 6px; }
+    .quote-box {
+        background: #f8fafc;
+        border: 1px solid #e2e8f0;
+        border-left: 3px solid #94a3b8;
+        border-radius: 10px;
+        padding: 8px 10px;
+        margin: 8px 0 0;
+        color: #334155;
+        font-size: 13px;
+    }
+
+    .tag { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 700; margin-right: 6px; }
     .tag-red { background-color: #FEF2F2; color: #DC2626; border: 1px solid #FECACA; }
     .tag-green { background-color: #ECFDF5; color: #059669; border: 1px solid #A7F3D0; }
     .tag-gray { background-color: #F1F5F9; color: #475569; border: 1px solid #E2E8F0; }
 
-    /* Media */
-    .media-grid { margin-top: 10px; margin-bottom: 12px; display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(var(--media-min, 180px), 1fr)); clear: both; }
-    .media-item { position: relative; overflow: hidden; border-radius: 10px; border: 1px solid #E2E8F0; background: #0F172A; min-height: 140px; max-width: 520px; box-shadow: 0 6px 14px rgba(15, 23, 42, 0.12); }
+    .media-grid { margin-top: 10px; margin-bottom: 8px; display: grid; gap: 8px; grid-template-columns: repeat(auto-fit, minmax(var(--media-min, 180px), 1fr)); }
+    .media-item { position: relative; overflow: hidden; border-radius: 12px; border: 1px solid #E2E8F0; background: #0F172A; min-height: 120px; box-shadow: 0 6px 14px rgba(15, 23, 42, 0.12); }
     .media-item img, .media-item video { width: 100%; height: auto; object-fit: cover; display: block; background: #0F172A; }
-    .media-item video { max-height: 260px; aspect-ratio: 16 / 9; }
+    .media-item video { max-height: 300px; aspect-ratio: 16 / 9; }
     .media-item img { aspect-ratio: 4 / 3; max-height: 340px; }
     .media-more { display: flex; align-items: center; justify-content: center; color: #1F2937; background: #E5E7EB; font-weight: 800; font-size: 16px; gap: 6px; }
     .media-more span { font-size: 12px; color: #475569; font-weight: 600; letter-spacing: 0.5px; }
 
-    /* Stock Tooltip */
+    .collapsible {
+        margin-top: 10px;
+        border: 1px solid #e2e8f0;
+        border-radius: 10px;
+        background: #fbfdff;
+    }
+    .collapsible summary {
+        cursor: pointer;
+        padding: 8px 10px;
+        font-weight: 700;
+        color: #334155;
+        font-size: 13px;
+    }
+    .collapsible .inner { padding: 0 10px 10px; color:#475569; font-size:13px; line-height:1.6; }
+
     .stock-tooltip { position: relative; display: inline-block; border-bottom: 2px dashed #F59E0B; cursor: help; font-weight: 700; color: #0F172A; }
     .stock-tooltip .tooltip-content { visibility: hidden; width: 420px; background: #ffffff; text-align: center; border-radius: 10px; padding: 10px; position: absolute; z-index: 99999; top: 130%; left: 50%; margin-left: -210px; opacity: 0; transition: opacity 0.2s; box-shadow: 0 12px 24px rgba(15, 23, 42, 0.16); border: 1px solid #E2E8F0; color: #1F2937;}
     .stock-tooltip:hover .tooltip-content { visibility: visible; opacity: 1; }
     .tooltip-image { width: 100%; height: auto; border-radius: 6px; }
     .stock-tooltip .tooltip-arrow { position: absolute; bottom: 100%; left: 50%; margin-left: -5px; border-width: 5px; border-style: solid; border-color: transparent transparent #E2E8F0 transparent; }
 
-    /* Streamlit chrome */
-    #MainMenu { visibility: hidden; }
-    footer { visibility: hidden; }
-    header { visibility: hidden; }
-
-    /* Streamlit widgets */
+    #MainMenu, footer, header { visibility: hidden; }
     .stButton > button {
-        background: #0F172A;
-        color: #fff;
-        border: 1px solid #0F172A;
-        border-radius: 10px;
-        padding: 0.55rem 0.85rem;
-        font-weight: 700;
-        box-shadow: 0 6px 14px rgba(15,23,42,0.12);
-        transition: transform 120ms ease, box-shadow 120ms ease;
+        background: #0F172A; color: #fff; border: 1px solid #0F172A; border-radius: 10px;
+        padding: 0.55rem 0.85rem; font-weight: 700; box-shadow: 0 6px 14px rgba(15,23,42,0.12);
     }
-    .stButton > button:hover {
-        transform: translateY(-1px);
-        box-shadow: 0 10px 20px rgba(15,23,42,0.18);
-    }
-    .stButton > button:active { transform: translateY(0px); }
-
     .stTextInput input, .stTextArea textarea, .stSelectbox div[data-baseweb="select"] > div {
-        border-radius: 10px !important;
-        border: 1px solid #E2E8F0 !important;
-        background: #fff !important;
-        box-shadow: 0 2px 10px rgba(15,23,42,0.05) !important;
+        border-radius: 10px !important; border: 1px solid #E2E8F0 !important; background: #fff !important;
     }
-    div[data-testid="stExpander"] {
-        border-radius: 12px;
-        border: 1px solid #E2E8F0;
-        overflow: hidden;
-        background: #fff;
-        box-shadow: 0 4px 14px rgba(15,23,42,0.06);
-    }
-    div[data-testid="stExpander"] summary { padding: 10px 12px; font-weight: 700; }
-
-    /* Top banner */
-    .topbar {
-        background: linear-gradient(135deg, #0F172A 0%, #1D4ED8 70%, #38BDF8 120%);
-        border-radius: 14px;
-        padding: 16px 18px;
-        color: #fff;
-        margin-bottom: 14px;
-        box-shadow: 0 10px 28px rgba(15,23,42,0.18);
-    }
-    .topbar h1 { color: #fff; margin: 0 !important; font-size: 26px; }
-    .topbar p { margin: 6px 0 0 0; color: rgba(255,255,255,0.82); font-size: 13px; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -805,82 +824,57 @@ def perform_auto_image_search(alert):
         return None
 
 def render_alert_card(alert, latest=False):
-    ai = alert.get('ai_analysis', {})
+    ai = alert.get('ai_analysis', {}) or {}
     is_high = ai.get('impact', False)
     impact_class = "hero-alert-high" if is_high else "hero-alert-low"
-    impact_label = '🚨 HIGH MARKET IMPACT' if is_high else '✅ LOW IMPACT'
+    impact_label = '🚨 HIGH MARKET IMPACT' if is_high else '✅ LOW MARKET IMPACT'
     tz_lbl = local_tz_label()
     ts_disp = to_local_str(pick_ts(alert))
-    media_html = build_media_html(alert.get('media'), 4 if latest else 3, 220 if latest else 180, post_id=str(alert.get('id', '')))
-    rec_html = render_recommendation(ai)
-    alert_id = str(alert.get('id', ''))
-    
-    # 改进reasoning显示：如果reasoning是默认或无意义的提示，显示更友好的内容
-    reasoning = ai.get('reasoning', 'Analysis pending...')
-    reasoning_lower = reasoning.lower()
-    
-    # 检查是否是默认或无意义的提示（扩展检测范围）
-    generic_phrases = [
-        'post lacks financial',
-        'post contains no substantive',
-        'no substantive content',
-        'no actionable data',
-        'no market-related',
-        'no financial content',
-        'no financial markets',
-        'no specific companies',
-        'analysis pending',
-        'ai analysis failed',
-        'lacks financial',
-        'contains no substantive'
-    ]
-    
-    is_generic = any(phrase in reasoning_lower for phrase in generic_phrases)
-    
-    # 如果有推荐或影响的资产，即使reasoning是通用的，也显示更有用的信息
-    has_recommendation = ai.get('recommendation') and ai.get('recommendation') != 'None'
-    has_assets = ai.get('affected_assets') and len(ai.get('affected_assets', [])) > 0
-    sentiment = ai.get('sentiment', 'neutral')
-    
-    if is_generic and not has_recommendation and not has_assets:
-        # 如果reasoning是通用的且没有其他有用信息，显示更简洁友好的提示
-        if sentiment != 'neutral':
-            reasoning = f"Sentiment: {sentiment.capitalize()}. No specific market impact detected."
-        else:
-            # 更简洁的提示，避免重复技术性描述
-            reasoning = "This post does not contain specific financial or market-related content."
-    elif is_generic and (has_recommendation or has_assets):
-        # 如果有推荐或资产，但reasoning是通用的，优先显示资产信息
-        if has_assets:
-            assets_str = ", ".join(ai.get('affected_assets', []))
-            reasoning = f"Affected assets: {assets_str}."
-        elif has_recommendation:
-            # 如果有推荐，显示推荐信息
-            reasoning = f"Recommendation: {ai.get('recommendation')}."
-    
+    post_id = str(alert.get('id', ''))
+    media_html = build_media_html(alert.get('media'), 5 if latest else 4, 220 if latest else 180, post_id=post_id)
+
+    content = (display_text(alert) or '').strip() or 'No content.'
+    try:
+        content_augmented = inject_stock_tooltips(content, ai.get('affected_assets', []) or [])
+    except Exception:
+        content_augmented = content
+
+    reasoning = (ai.get('reasoning') or 'Analysis pending...').strip()
+    recommendation = (ai.get('recommendation') or '').strip()
+    source_text = 'REAL' if alert.get('source', 'real') == 'real' else 'SIMULATED'
+
+    quote_context = (ai.get('external_context_used', '') or '').strip()
+    if ' | ' in quote_context:
+        quote_context = quote_context.split(' | ')[0]
+    if len(quote_context) > 180:
+        quote_context = quote_context[:180] + '...'
+
+    rec_html = render_recommendation(ai) if recommendation and recommendation != 'None' else '<div class="inner" style="padding:0 10px 10px;color:#64748b;">No concrete trade suggestion from upstream model.</div>'
+    media_summary = (ai.get('media_ai_summary', '') or '').strip() or 'No media analysis available.'
+
     return f"""<div class="hero-card {impact_class}">
-<div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
-<span class="tag {'tag-red' if is_high else 'tag-green'}">{impact_label}</span>
-<span class="tag tag-gray">{'REAL' if alert.get('source','real')=='real' else 'SIMULATED'}</span>
-<span style="color:#64748B; font-size:12px;">{ts_disp} ({tz_lbl})</span>
+<div class="feed-head">
+  <div class="avatar">TS</div>
+  <div style="flex:1; min-width:0;">
+    <div class="author-line">
+      <span class="author-name">@realDonaldTrump</span>
+      <span class="tag {'tag-red' if is_high else 'tag-green'}">{impact_label}</span>
+      <span class="tag tag-gray">{source_text}</span>
+    </div>
+    <div class="post-time">{ts_disp} ({tz_lbl})</div>
+    <div class="post-content">{content_augmented}</div>
+  </div>
 </div>
-<div class="post-content">“{content_augmented}”</div>
-<div style="clear: both; margin-bottom: 8px;">{media_html}</div>
-{rec_html}
-<div style="margin-top:16px; padding-top:16px; border-top:1px solid #E2E8F0; clear: both; position: relative; z-index: 1;">
-<div style="font-weight:600; font-size:14px; color:#475569; margin-bottom:4px;">🤖 AI Analyst Notes:</div>
-<div style="color:#334155; font-size:14px; margin-bottom:8px;">{reasoning}</div>
-</div>
-<details style="margin-top:8px;">
-<summary style="cursor:pointer; color:#334155; font-size:12px; font-weight:600;">AI Context Details</summary>
-<div style="padding:8px; border:1px dashed #CBD5E1; border-radius:6px; margin-top:6px;">
-<div style="font-size:12px; color:#64748B; line-height:1.6; padding:8px; background-color:#F8FAFC; border-radius:4px; margin-bottom:8px;"><strong>🖼️ Media:</strong><br/>{ai.get('media_ai_summary','').strip() or '<em style="color:#94A3B8;">No media analysis available.</em>'}</div>
-<div style="font-size:12px; color:#64748B; line-height:1.6; padding:8px; background-color:#F8FAFC; border-radius:4px;">
-<strong>🌐 External Context:</strong><br/>{(ai.get('external_context_used','') or '').strip().replace(' | ','<br/>') or '<em style="color:#94A3B8;">No external context.</em>'}
-</div>
-</div>
+<div style="margin-top:6px;">{media_html}</div>
+{f'<div class="quote-box"><strong>Quoted context</strong><br/>{quote_context}</div>' if quote_context else ''}
+<details class="collapsible">
+  <summary>🧠 上游AI分析</summary>
+  <div class="inner">{reasoning}<br/><br/><strong>Media:</strong> {media_summary}</div>
 </details>
-</div>
+<details class="collapsible">
+  <summary>💹 市场观点建议</summary>
+  {rec_html}
+</details>
 </div>"""
 
 # ==========================================
@@ -1528,7 +1522,7 @@ if not st.session_state.get('is_fetching', False) and time_elapsed >= check_inte
             # 页面会在下一次用户交互或JavaScript自动刷新时更新
             # 不再调用 st.rerun()，让页面正常渲染，JavaScript会自动刷新
 
-st.markdown("---")
+st.markdown("""<div class='nav-shell'><div class='nav-row'><div><div class='nav-title'>🏠 Truth Feed</div><div class='nav-meta'>Social-style stream · Auto-synced with local API/media map</div></div><div class='nav-meta'>Tabs: Feed · Archive · Gallery · Settings</div></div></div>""", unsafe_allow_html=True)
 
 # Metrics Grid
 # 重新从session_state读取alerts，确保使用最新的数据（可能在定时刷新逻辑中已更新）
@@ -1536,6 +1530,14 @@ alerts = st.session_state.get('cached_alerts', [])
 # 使用真正最新的告警（alerts[0]），即使它没有内容
 latest = alerts[0] if alerts else None
 alerts_vis = [a for a in alerts if str(display_text(a) or '').strip()]
+
+st.markdown("<div class='filter-shell'>", unsafe_allow_html=True)
+f_col1, f_col2, f_col3, f_col4 = st.columns([0.34, 0.22, 0.22, 0.22])
+feed_search = f_col1.text_input("🔎 Search in feed", value=st.session_state.get('feed_search', ''), key='feed_search')
+feed_impact = f_col2.selectbox("Impact", ["All", "High", "Low"], index=0, key='feed_impact_filter')
+feed_source = f_col3.selectbox("Source", ["All", "REAL", "SIMULATED"], index=0, key='feed_source_filter')
+feed_media = f_col4.selectbox("Media", ["All", "With media", "Text only"], index=0, key='feed_media_filter')
+st.markdown("</div>", unsafe_allow_html=True)
 
 if latest:
     high_impact_count = sum(1 for a in alerts if a.get('ai_analysis', {}).get('impact'))
@@ -1592,12 +1594,36 @@ if latest:
     with c_feed_title:
         st.subheader("📜 Recent Posts")
     
-    # List Layout - 显示5个最新的推文（跳过顶部已显示的最新一个）
-    # 使用 alerts（未过滤）确保有足够的推文，即使某些没有文字内容
-    _feed = alerts[1:6]  # 从索引1开始，取5个（索引1,2,3,4,5）
+    # List Layout - 结合顶部过滤器，模拟社交平台信息流
+    feed_pool = alerts[1:] if len(alerts) > 1 else []
+
+    def _feed_match(alert):
+        ai = alert.get('ai_analysis', {}) or {}
+        impact_val = 'High' if ai.get('impact') else 'Low'
+        source_val = 'REAL' if alert.get('source', 'real') == 'real' else 'SIMULATED'
+        has_media = bool(alert.get('media'))
+        blob = ' '.join([
+            (display_text(alert) or ''),
+            (ai.get('reasoning') or ''),
+            ' '.join(map(str, ai.get('affected_assets', []) or []))
+        ]).lower()
+        if feed_search and feed_search.lower().strip() not in blob:
+            return False
+        if feed_impact != 'All' and impact_val != feed_impact:
+            return False
+        if feed_source != 'All' and source_val != feed_source:
+            return False
+        if feed_media == 'With media' and not has_media:
+            return False
+        if feed_media == 'Text only' and has_media:
+            return False
+        return True
+
+    _feed = [a for a in feed_pool if _feed_match(a)][:8]
+    if not _feed:
+        st.info('No posts matched current filter conditions.')
     for _i, alert in enumerate(_feed):
         st.markdown(render_alert_card(alert, latest=False), unsafe_allow_html=True)
-
         if _i < len(_feed) - 1:
             st.divider()
 
