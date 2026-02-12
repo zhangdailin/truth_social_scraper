@@ -32,6 +32,8 @@ pip install -r requirements.txt
 - `HUGGINGFACE_API_KEY`：用于调用 Hugging Face Inference 的 Token
 - `HUGGINGFACE_IMAGE_MODEL`：图片字幕模型（默认可用：`Salesforce/blip-image-captioning-large` 或 `nlpconnect/vit-gpt2-image-captioning`）
 - `SOCKS_PROXY`：socks5 代理（例如：`127.0.0.1:7890` 或 `socks5://127.0.0.1:7890`）
+- `API_REFRESH_LOCAL_ONLY`：刷新接口是否仅允许本机调用（默认 `1`）。设为 `0` 可允许远程调用。
+- `API_REFRESH_TOKEN`：可选。设置后，调用 `/api/refresh` 需提供请求头 `X-Refresh-Token`。
 
 建议将以上变量注入到 systemd 服务单位文件的 `[Service] Environment=...` 中。
 
@@ -57,6 +59,8 @@ uvicorn api:app --host 0.0.0.0 --port 8000
 - `GET /api/health`：健康检查（文件路径与工作目录）
 - `GET /api/health/hf`：Hugging Face 健康检查（是否安装、Key 与示例字幕）
 - `GET /api/export/dashboard`：统一仪表盘数据 JSON
+- `POST /api/refresh`：手动触发拉取/刷新（支持 `limit`、`fast_init`、`background` 查询参数）
+- `GET /api/refresh/status`：查看最近一次刷新任务状态
 
 ## systemd 服务示例（Linux）
 仪表盘（Streamlit）：
@@ -77,6 +81,9 @@ Environment=SILICONFLOW_API_KEY=your_siliconflow_key
 Environment=HUGGINGFACE_API_KEY=your_hf_token
 Environment=HUGGINGFACE_IMAGE_MODEL=Salesforce/blip-image-captioning-large
 Environment=SOCKS_PROXY=127.0.0.1:7890
+Environment=API_REFRESH_LOCAL_ONLY=1
+# 可选：开启令牌校验
+# Environment=API_REFRESH_TOKEN=your_refresh_token
 
 [Install]
 WantedBy=multi-user.target
@@ -100,6 +107,9 @@ Environment=SILICONFLOW_API_KEY=your_siliconflow_key
 Environment=HUGGINGFACE_API_KEY=your_hf_token
 Environment=HUGGINGFACE_IMAGE_MODEL=Salesforce/blip-image-captioning-large
 Environment=SOCKS_PROXY=127.0.0.1:7890
+Environment=API_REFRESH_LOCAL_ONLY=1
+# 可选：开启令牌校验
+# Environment=API_REFRESH_TOKEN=your_refresh_token
 
 [Install]
 WantedBy=multi-user.target
@@ -125,6 +135,10 @@ WantedBy=multi-user.target
 - Hugging Face 字幕为 `sample_caption_present=false`
   - 确认已安装 `huggingface_hub`，且服务进程读取到了 `HUGGINGFACE_API_KEY`
   - 通过 `GET /api/health/hf` 查看 `hub_installed` 与错误信息
+- 刷新接口返回 403/404（常见是端口打错）
+  - `8501` 是 Streamlit 仪表盘端口，不是 API
+  - 刷新接口应访问 `8000`：`POST /api/refresh`
+  - 若远程调用被拒绝，检查 `API_REFRESH_LOCAL_ONLY` 是否为 `0`，并确认防火墙/安全组已放行 `8000`
 - 模块未找到：`ModuleNotFoundError: huggingface_hub`
   - 安装依赖到服务使用的解释器：`pip3 install huggingface_hub`
   - 重启 `systemctl` 服务
