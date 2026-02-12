@@ -1995,7 +1995,7 @@ def save_alert(post, keywords, ai_analysis=None, source=None, downloaded_media_p
         traceback.print_exc()
         raise  # 重新抛出异常，避免静默失败
 
-def run_fetch_recent(limit=20, fast_init=False):
+def run_fetch_recent(limit=20, fast_init=False, force=False):
     if not ENABLE_REMOTE_FETCH:
         print("[run_fetch_recent] Remote fetch disabled via ENABLE_REMOTE_FETCH flag.")
         return 0
@@ -2034,8 +2034,8 @@ def run_fetch_recent(limit=20, fast_init=False):
         try:
             post_id = str(post.get("id") or "").strip()
             
-            # 先检查是否已处理，避免重复处理
-            if post_id and post_id in processed_ids:
+            # 默认跳过已处理帖子；force=True 时允许重刷覆盖
+            if (not force) and post_id and post_id in processed_ids:
                 continue  # 跳过已处理的帖子
             
             media_atts = post.get("media_attachments", [])
@@ -2074,7 +2074,7 @@ def run_fetch_recent(limit=20, fast_init=False):
             created_iso = normalize_iso(post.get("created_at"))
             url = post.get("url") or "https://truthsocial.com/@realDonaldTrump"
 
-            if alerts_empty or (post_id and post_id not in processed_ids):
+            if force or alerts_empty or (post_id and post_id not in processed_ids):
                 save_alert(
                     {
                         "id": post_id or f"api_{int(datetime.now(timezone.utc).timestamp())}",

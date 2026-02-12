@@ -1292,6 +1292,7 @@ async def trigger_refresh(
     request: Request,
     limit: int = Query(20, ge=1, le=200),
     fast_init: bool = Query(False),
+    force: bool = Query(False, description="是否强制重刷（忽略processed_ids去重）"),
     background: bool = Query(True),
     x_refresh_token: str | None = Header(default=None, alias="X-Refresh-Token"),
 ):
@@ -1306,6 +1307,7 @@ async def trigger_refresh(
     参数：
     - limit: 拉取最近多少条（1-200）
     - fast_init: 传给 run_fetch_recent
+    - force: true 时忽略 processed_ids 去重，强制重刷覆盖
     - background: True 则异步执行并立即返回
     """
     client_host = (request.client.host if request.client else "").strip()
@@ -1332,7 +1334,7 @@ async def trigger_refresh(
 
         try:
             from monitor_trump import run_fetch_recent
-            n = run_fetch_recent(limit=limit, fast_init=fast_init)
+            n = run_fetch_recent(limit=limit, fast_init=fast_init, force=force)
             with _refresh_lock:
                 _refresh_state["last_result"] = {"new_posts": int(n)}
         except Exception as e:
