@@ -253,33 +253,39 @@ def is_port_in_use(host, port):
             return True
 
 def start_api_server():
-    """在后台线程中启动API服务器"""
+    """在后台线程中启动API服务器
+
+    Returns:
+        (ok: bool, err: str|None)
+    """
     try:
         from api import run_api_server
         # 使用守护线程，确保主程序退出时线程也会退出
         api_thread = threading.Thread(
             target=run_api_server,
             args=(API_HOST, API_PORT),
-            daemon=True
+            daemon=True,
         )
         api_thread.start()
         # 等待一小段时间确保服务器启动
         time.sleep(1)
-        return True
+        return True, None
     except Exception as e:
-        print(f"Failed to start API server: {e}")
-        return False
+        err = f"{type(e).__name__}: {e}"
+        print(f"Failed to start API server: {err}")
+        return False, err
 
 # 检查并启动API服务器（只启动一次）
 if 'api_server_started' not in st.session_state:
     try:
         if not is_port_in_use(API_HOST, API_PORT):
-            if start_api_server():
+            ok, err = start_api_server()
+            if ok:
                 st.session_state['api_server_started'] = True
                 st.session_state['api_error'] = None
             else:
                 st.session_state['api_server_started'] = False
-                st.session_state['api_error'] = "启动失败"
+                st.session_state['api_error'] = err or "启动失败"
         else:
             st.session_state['api_server_started'] = True
             st.session_state['api_error'] = None
