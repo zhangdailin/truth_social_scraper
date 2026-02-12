@@ -359,6 +359,55 @@ st.markdown("""
     .stock-tooltip:hover .tooltip-content { visibility: visible; opacity: 1; }
     .tooltip-image { width: 100%; height: auto; border-radius: 6px; }
     .stock-tooltip .tooltip-arrow { position: absolute; bottom: 100%; left: 50%; margin-left: -5px; border-width: 5px; border-style: solid; border-color: transparent transparent #E2E8F0 transparent; }
+
+    /* Streamlit chrome */
+    #MainMenu { visibility: hidden; }
+    footer { visibility: hidden; }
+    header { visibility: hidden; }
+
+    /* Streamlit widgets */
+    .stButton > button {
+        background: #0F172A;
+        color: #fff;
+        border: 1px solid #0F172A;
+        border-radius: 10px;
+        padding: 0.55rem 0.85rem;
+        font-weight: 700;
+        box-shadow: 0 6px 14px rgba(15,23,42,0.12);
+        transition: transform 120ms ease, box-shadow 120ms ease;
+    }
+    .stButton > button:hover {
+        transform: translateY(-1px);
+        box-shadow: 0 10px 20px rgba(15,23,42,0.18);
+    }
+    .stButton > button:active { transform: translateY(0px); }
+
+    .stTextInput input, .stTextArea textarea, .stSelectbox div[data-baseweb="select"] > div {
+        border-radius: 10px !important;
+        border: 1px solid #E2E8F0 !important;
+        background: #fff !important;
+        box-shadow: 0 2px 10px rgba(15,23,42,0.05) !important;
+    }
+    div[data-testid="stExpander"] {
+        border-radius: 12px;
+        border: 1px solid #E2E8F0;
+        overflow: hidden;
+        background: #fff;
+        box-shadow: 0 4px 14px rgba(15,23,42,0.06);
+    }
+    div[data-testid="stExpander"] summary { padding: 10px 12px; font-weight: 700; }
+
+    /* Top banner */
+    .topbar {
+        background: linear-gradient(135deg, #0F172A 0%, #1D4ED8 70%, #38BDF8 120%);
+        border-radius: 14px;
+        padding: 16px 18px;
+        color: #fff;
+        margin-bottom: 14px;
+        box-shadow: 0 10px 28px rgba(15,23,42,0.18);
+    }
+    .topbar h1 { color: #fff; margin: 0 !important; font-size: 26px; }
+    .topbar p { margin: 6px 0 0 0; color: rgba(255,255,255,0.82); font-size: 13px; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -392,6 +441,14 @@ document.addEventListener('DOMContentLoaded', function(){
 })();
 </script>
 """, unsafe_allow_html=True)
+
+st.markdown(
+    """<div class="topbar">
+    <h1>Trump Truth Social Monitor</h1>
+    <p>Latest posts, media gallery, and AI market notes — optimized for quick scanning.</p>
+    </div>""",
+    unsafe_allow_html=True,
+)
 
 # ==========================================
 # 3. DATA LOADING
