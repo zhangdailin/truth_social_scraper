@@ -1996,6 +1996,8 @@ def save_alert(post, keywords, ai_analysis=None, source=None, downloaded_media_p
         raise  # 重新抛出异常，避免静默失败
 
 def run_fetch_recent(limit=20, fast_init=False, force=False):
+    run_t0 = time.time()
+    print(f"[refresh] start limit={limit} fast_init={fast_init} force={force}")
     if not ENABLE_REMOTE_FETCH:
         print("[run_fetch_recent] Remote fetch disabled via ENABLE_REMOTE_FETCH flag.")
         return 0
@@ -2006,6 +2008,7 @@ def run_fetch_recent(limit=20, fast_init=False, force=False):
         print(f"  TRUTH_ACCOUNT_ID is digit: {str(TRUTH_ACCOUNT_ID).isdigit() if TRUTH_ACCOUNT_ID else False}")
         return 0
 
+    t_fetch0 = time.time()
     items = fetch_truth_posts(
         TRUTH_ACCOUNT_ID,
         TRUTH_USERNAME,
@@ -2013,7 +2016,7 @@ def run_fetch_recent(limit=20, fast_init=False, force=False):
         limit=limit,
         fast_init=fast_init,
     )
-    print(f"CookieAPI fetched items: {len(items) if isinstance(items, list) else 0}")
+    print(f"CookieAPI fetched items: {len(items) if isinstance(items, list) else 0}; fetch_sec={time.time()-t_fetch0:.2f}")
     
     processed_ids = load_processed_posts()
     alerts_empty = _alerts_file_empty()
@@ -2032,6 +2035,7 @@ def run_fetch_recent(limit=20, fast_init=False, force=False):
 
     for post in sorted_items:
         try:
+            post_t0 = time.time()
             post_id = str(post.get("id") or "").strip()
             
             # 默认跳过已处理帖子；force=True 时允许重刷覆盖
@@ -2046,6 +2050,7 @@ def run_fetch_recent(limit=20, fast_init=False, force=False):
             print(f"Processing post {post_id}...")
             downloaded_paths = []
             media_for_ai = []
+            t_media0 = time.time()
             if media_atts:
                 for m in media_atts:
                     t = (m.get("type") or "").lower()
@@ -2068,13 +2073,17 @@ def run_fetch_recent(limit=20, fast_init=False, force=False):
                         if lp:
                             downloaded_paths.append(lp)
                             media_for_ai.append({"type": "image", "url": lp, "preview_url": lp})
+            media_sec = time.time()-t_media0
+            t_ai0 = time.time()
             ai_result = analyze_with_ai(content, media=media_for_ai)
-            print(f"AI analysis completed for post {post_id}")
+            ai_sec = time.time()-t_ai0
+            print(f"AI analysis completed for post {post_id}; media_sec={media_sec:.2f} ai_sec={ai_sec:.2f}")
             
             created_iso = normalize_iso(post.get("created_at"))
             url = post.get("url") or "https://truthsocial.com/@realDonaldTrump"
 
             if force or alerts_empty or (post_id and post_id not in processed_ids):
+                t_save0 = time.time()
                 save_alert(
                     {
                         "id": post_id or f"api_{int(datetime.now(timezone.utc).timestamp())}",
@@ -2091,16 +2100,16 @@ def run_fetch_recent(limit=20, fast_init=False, force=False):
                 if post_id:
                     processed_ids.add(post_id)
                 new_posts_count += 1
-                print(f"Saved alert for post {post_id}")
+                print(f"Saved alert for post {post_id}; save_sec={time.time()-t_save0:.2f}; post_total_sec={time.time()-post_t0:.2f}")
         except Exception as e:
-            print(f"Error processing post {post.get('id', 'unknown')}: {e}")
+            print(f"Error processing post {post.get('id', 'unknown')}: {e}; post_total_sec={time.time()-post_t0:.2f}")
             import traceback
             traceback.print_exc()
             # 继续处理下一个帖子，不要因为一个失败就停止
             continue
 
     save_processed_posts(processed_ids)
-    print(f"CookieAPI wrote alerts: {new_posts_count}")
+    print(f"CookieAPI wrote alerts: {new_posts_count}; total_sec={time.time()-run_t0:.2f}")
     return new_posts_count
 
  
