@@ -11,7 +11,7 @@ from fastapi import FastAPI, Query, HTTPException, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse, HTMLResponse
 from urllib.parse import quote, unquote
-from urllib.request import Request, urlopen
+from urllib.request import Request as UrlRequest, urlopen
 import re
 from pydantic import BaseModel
 from threading import Thread, Lock
@@ -587,7 +587,7 @@ def extract_text_from_image(image_url):
     如果 API 不可用或失败，返回空字符串（不影响其他功能）
     """
     try:
-        from urllib.request import urlopen, Request
+        from urllib.request import urlopen, Request as UrlRequest
         from utils import _setup_proxy
         
         # 使用 HuggingFace API 进行 OCR
@@ -632,7 +632,7 @@ def extract_text_from_image(image_url):
             # 如果本地文件读取失败或不是本地API，使用HTTP下载
             if image_data is None:
                 _setup_proxy()
-                req = Request(image_url, headers={"User-Agent": "Mozilla/5.0"})
+                req = UrlRequest(image_url, headers={"User-Agent": "Mozilla/5.0"})
                 # 如果是本地API，使用更长的超时时间（本地API可能响应较慢）
                 timeout = 120 if is_local_api else 30
                 try:
