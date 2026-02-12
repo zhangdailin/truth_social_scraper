@@ -5,7 +5,7 @@ Truth Social Monitor API
 import os
 import json
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Optional, List
 from fastapi import FastAPI, Query, HTTPException, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -99,6 +99,8 @@ app.add_middleware(
 # ==========================================
 REFRESH_TOKEN = os.getenv("API_REFRESH_TOKEN", "").strip()
 REFRESH_LOCAL_ONLY = os.getenv("API_REFRESH_LOCAL_ONLY", "1").strip().lower() not in ("0","false","no")
+REFRESH_MAX_RUNNING_SECONDS = int(os.getenv("API_REFRESH_MAX_RUNNING_SECONDS", "120"))
+REFRESH_TASK_TIMEOUT_SECONDS = int(os.getenv("API_REFRESH_TASK_TIMEOUT_SECONDS", "90"))
 _refresh_lock = Lock()
 _refresh_state = {
     "running": False,
@@ -1287,6 +1289,27 @@ async def debug_info():
     }
 
 
+def _refresh_reset_if_stale():
+    """Reset refresh running flag when it is stale (best-effort safeguard)."""
+    with _refresh_lock:
+        if not _refresh_state.get("running"):
+            return False
+        last_start = _refresh_state.get("last_start")
+        if not last_start:
+            return False
+        try:
+            dt = datetime.fromisoformat(str(last_start).replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            if datetime.now(timezone.utc) - dt > timedelta(seconds=REFRESH_MAX_RUNNING_SECONDS):
+                _refresh_state["running"] = False
+                _refresh_state["last_end"] = datetime.now(timezone.utc).isoformat()
+                _refresh_state["last_error"] = f"refresh timeout/reset after {REFRESH_MAX_RUNNING_SECONDS}s"
+                return True
+        except Exception:
+            return False
+    return False
+
 @app.post("/api/refresh", tags=["维护"])
 async def trigger_refresh(
     request: Request,
@@ -1322,7 +1345,7 @@ async def trigger_refresh(
 
     def _do_refresh():
         import traceback
-        from datetime import datetime, timezone
+        from datetime import datetime, timezone, timedelta
 
         with _refresh_lock:
             if _refresh_state.get("running"):
@@ -1334,9 +1357,20 @@ async def trigger_refresh(
 
         try:
             from monitor_trump import run_fetch_recent
-            n = run_fetch_recent(limit=limit, fast_init=fast_init, force=force)
+            from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
+
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                fut = pool.submit(run_fetch_recent, limit=limit, fast_init=fast_init, force=force)
+                try:
+                    n = fut.result(timeout=REFRESH_TASK_TIMEOUT_SECONDS)
+                except FutureTimeout:
+                    with _refresh_lock:
+                        _refresh_state["last_error"] = f"refresh task timeout after {REFRESH_TASK_TIMEOUT_SECONDS}s"
+                    n = 0
+
             with _refresh_lock:
-                _refresh_state["last_result"] = {"new_posts": int(n)}
+                if _refresh_state.get("last_error") is None:
+                    _refresh_state["last_result"] = {"new_posts": int(n)}
         except Exception as e:
             with _refresh_lock:
                 _refresh_state["last_error"] = str(e)
@@ -1346,6 +1380,7 @@ async def trigger_refresh(
                 _refresh_state["running"] = False
                 _refresh_state["last_end"] = datetime.now(timezone.utc).isoformat()
 
+    _refresh_reset_if_stale()
     with _refresh_lock:
         running = bool(_refresh_state.get("running"))
 
@@ -1362,6 +1397,7 @@ async def trigger_refresh(
 @app.get("/api/refresh/status", tags=["维护"])
 async def refresh_status():
     """查看最近一次 refresh 状态"""
+    _refresh_reset_if_stale()
     with _refresh_lock:
         return {"ok": True, **_refresh_state}
 
