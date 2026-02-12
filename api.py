@@ -7,14 +7,14 @@ import json
 import re
 from datetime import datetime, timezone
 from typing import Optional, List
-from fastapi import FastAPI, Query, HTTPException
+from fastapi import FastAPI, Query, HTTPException, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse, HTMLResponse
 from urllib.parse import quote, unquote
 from urllib.request import Request, urlopen
 import re
 from pydantic import BaseModel
-from threading import Thread
+from threading import Thread, Lock
 import hashlib
 
 from utils import (
@@ -93,6 +93,19 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+# ==========================================
+# 手动刷新（Trigger Refresh）
+# ==========================================
+REFRESH_TOKEN = os.getenv("API_REFRESH_TOKEN", "").strip()
+_refresh_lock = Lock()
+_refresh_state = {
+    "running": False,
+    "last_start": None,
+    "last_end": None,
+    "last_result": None,
+    "last_error": None,
+}
 # 注意：不使用 app.mount，而是使用路由端点来提供媒体文件
 # 这样可以更好地控制文件访问和错误处理
 # 媒体文件将通过 /api/media/{file_path:path} 端点提供
@@ -1271,6 +1284,79 @@ async def debug_info():
         "media_info": media_info,
         "timestamp": datetime.now(timezone.utc).isoformat()
     }
+
+
+@app.post("/api/refresh", tags=["维护"])
+async def trigger_refresh(
+    request: Request,
+    limit: int = Query(20, ge=1, le=200),
+    fast_init: bool = Query(False),
+    background: bool = Query(True),
+    x_refresh_token: str | None = Header(default=None, alias="X-Refresh-Token"),
+):
+    """
+    手动触发抓取/刷新数据（调用 monitor_trump.run_fetch_recent）。
+
+    安全：
+    - 若设置了环境变量 API_REFRESH_TOKEN，则：
+      - localhost/127.0.0.1 可直接调用
+      - 其它来源需要 Header: X-Refresh-Token 匹配
+
+    参数：
+    - limit: 拉取最近多少条（1-200）
+    - fast_init: 传给 run_fetch_recent
+    - background: True 则异步执行并立即返回
+    """
+    client_host = (request.client.host if request.client else "").strip()
+
+    if REFRESH_TOKEN:
+        if client_host not in ("127.0.0.1", "::1", "localhost") and (x_refresh_token or "") != REFRESH_TOKEN:
+            raise HTTPException(status_code=401, detail="unauthorized")
+
+    def _do_refresh():
+        import traceback
+        from datetime import datetime, timezone
+
+        with _refresh_lock:
+            if _refresh_state.get("running"):
+                return
+            _refresh_state["running"] = True
+            _refresh_state["last_start"] = datetime.now(timezone.utc).isoformat()
+            _refresh_state["last_error"] = None
+            _refresh_state["last_result"] = None
+
+        try:
+            from monitor_trump import run_fetch_recent
+            n = run_fetch_recent(limit=limit, fast_init=fast_init)
+            with _refresh_lock:
+                _refresh_state["last_result"] = {"new_posts": int(n)}
+        except Exception as e:
+            with _refresh_lock:
+                _refresh_state["last_error"] = str(e)
+            traceback.print_exc()
+        finally:
+            with _refresh_lock:
+                _refresh_state["running"] = False
+                _refresh_state["last_end"] = datetime.now(timezone.utc).isoformat()
+
+    with _refresh_lock:
+        running = bool(_refresh_state.get("running"))
+
+    if running:
+        return {"ok": False, "status": "running", "state": _refresh_state}
+
+    if background:
+        Thread(target=_do_refresh, daemon=True).start()
+        return {"ok": True, "status": "started", "state": _refresh_state}
+
+    _do_refresh()
+    return {"ok": True, "status": "done", "state": _refresh_state}
+
+@app.get("/api/refresh/status", tags=["维护"])
+async def refresh_status():
+    """查看最近一次 refresh 状态"""
+    with _refresh_lock:
+        return {"ok": True, **_refresh_state}
 
 # ==========================================
 # 错误处理
