@@ -98,6 +98,7 @@ app.add_middleware(
 # 手动刷新（Trigger Refresh）
 # ==========================================
 REFRESH_TOKEN = os.getenv("API_REFRESH_TOKEN", "").strip()
+REFRESH_LOCAL_ONLY = os.getenv("API_REFRESH_LOCAL_ONLY", "1").strip().lower() not in ("0","false","no")
 _refresh_lock = Lock()
 _refresh_state = {
     "running": False,
@@ -1298,9 +1299,9 @@ async def trigger_refresh(
     手动触发抓取/刷新数据（调用 monitor_trump.run_fetch_recent）。
 
     安全：
-    - 若设置了环境变量 API_REFRESH_TOKEN，则：
-      - localhost/127.0.0.1 可直接调用
-      - 其它来源需要 Header: X-Refresh-Token 匹配
+    - 默认不需要 key，但只允许 localhost 调用（API_REFRESH_LOCAL_ONLY=1）。
+    - 若你要允许远程触发：设置 API_REFRESH_LOCAL_ONLY=0。
+    - 可选：若设置 API_REFRESH_TOKEN，则需要 Header: X-Refresh-Token 匹配。
 
     参数：
     - limit: 拉取最近多少条（1-200）
@@ -1309,9 +1310,13 @@ async def trigger_refresh(
     """
     client_host = (request.client.host if request.client else "").strip()
 
-    if REFRESH_TOKEN:
-        if client_host not in ("127.0.0.1", "::1", "localhost") and (x_refresh_token or "") != REFRESH_TOKEN:
-            raise HTTPException(status_code=401, detail="unauthorized")
+    # Default: no key required, but restrict to localhost unless API_REFRESH_LOCAL_ONLY=0.
+    if REFRESH_LOCAL_ONLY and client_host not in ("127.0.0.1", "::1", "localhost"):
+        raise HTTPException(status_code=403, detail="forbidden")
+
+    # Optional token gate (only if API_REFRESH_TOKEN is set)
+    if REFRESH_TOKEN and (x_refresh_token or "") != REFRESH_TOKEN:
+        raise HTTPException(status_code=401, detail="unauthorized")
 
     def _do_refresh():
         import traceback
