@@ -531,23 +531,8 @@ def build_media_html(media, max_images=4, width=220, post_id=None):
         
         # 如果有本地文件，优先使用本地文件（完全使用映射，不再处理media列表，避免重复）
         if local_media_paths:
-            # 先检查是否有视频文件
-            has_video = any(
-                any(ext in path.lower() for ext in ['.mp4', '.webm', '.mov', '.avi', '.mkv'])
-                for path in local_media_paths
-                if os.path.exists(path)
-            )
-            
-            # 计算实际应该显示的媒体数量（排除被跳过的预览图）
-            displayable_count = 0
-            for local_path in local_media_paths:
-                if not os.path.exists(local_path):
-                    continue
-                is_video_check = any(ext in local_path.lower() for ext in ['.mp4', '.webm', '.mov', '.avi', '.mkv'])
-                # 如果有视频，跳过预览图（图片文件）
-                if has_video and not is_video_check:
-                    continue
-                displayable_count += 1
+            # 计算实际可显示媒体数量（保留视频+图片，不再因有视频而隐藏图片）
+            displayable_count = sum(1 for local_path in local_media_paths if os.path.exists(local_path))
             
             for i, local_path in enumerate(local_media_paths):
                 if len(items) >= max_images:
@@ -561,8 +546,6 @@ def build_media_html(media, max_images=4, width=220, post_id=None):
                     rel_path_normalized = rel_path.replace('\\', '/').lstrip('/')
                     api_path = f"{api_base_url}/api/media/{rel_path_normalized}"
                     is_video = any(ext in local_path.lower() for ext in ['.mp4', '.webm', '.mov', '.avi', '.mkv'])
-                    if has_video and not is_video:
-                        continue
                     if is_video:
                         items.append(
                             f'<div class="media-item" style="position: relative; margin-bottom: 8px;">'
@@ -589,32 +572,21 @@ def build_media_html(media, max_images=4, width=220, post_id=None):
         
         # 如果没有通过推文ID找到本地文件，使用media列表中的URL（向后兼容）
         if not local_media_paths:
-            # 先检查media列表中是否有视频
-            has_video_in_media = False
-            for m in media:
-                vsrc_check = m.get("url") or m.get("remote_url") or ""
-                t_check = (m.get("type") or "").lower()
-                is_video_check = t_check in ("video", "gifv") or (vsrc_check and (".mp4" in vsrc_check.lower() or "video" in vsrc_check.lower() or "/videos/" in vsrc_check.lower()))
-                if is_video_check and vsrc_check:
-                    has_video_in_media = True
-                    break
-            
-            # 计算实际应该显示的媒体数量（排除被跳过的预览图）
+            # 保留视频与图片，避免“有视频时图片被隐藏”
             displayable_count = 0
             filtered_media = []
+            seen_media_keys = set()
             for m in media:
                 vsrc_check = m.get("url") or m.get("remote_url") or ""
                 poster_check = m.get("preview_url") or ""
-                t_check = (m.get("type") or "").lower()
-                is_video_check = t_check in ("video", "gifv") or (vsrc_check and (".mp4" in vsrc_check.lower() or "video" in vsrc_check.lower() or "/videos/" in vsrc_check.lower()))
-                # 如果有视频，跳过预览图（只有preview_url而没有实际视频URL的项）
-                if has_video_in_media and not is_video_check and not vsrc_check and poster_check:
+                key = (str(vsrc_check).strip(), str(poster_check).strip(), str(m.get("type") or "").lower())
+                if key in seen_media_keys:
                     continue
-                # 如果有有效的媒体源，计入可显示数量
-                if (is_video_check and vsrc_check) or (poster_check or vsrc_check):
+                seen_media_keys.add(key)
+                if poster_check or vsrc_check:
                     filtered_media.append(m)
                     displayable_count += 1
-            
+
             for m in filtered_media:
                 if len(items) >= max_images:
                     break
@@ -632,9 +604,6 @@ def build_media_html(media, max_images=4, width=220, post_id=None):
                 t = (m.get("type") or "").lower()
                 is_video = t in ("video", "gifv") or (vsrc and (".mp4" in vsrc.lower() or "video" in vsrc.lower() or "/videos/" in vsrc.lower()))
 
-                # 如果有视频，跳过预览图（只有preview_url而没有实际视频URL的项）
-                if has_video_in_media and not is_video and not vsrc and poster:
-                    continue
 
                 if is_video and vsrc:
                     # 使用简化的视频播放器（避免复杂的script导致渲染问题）
@@ -738,6 +707,7 @@ def build_search_links(alert):
     from urllib.parse import quote
     
     content = display_text(alert)
+    content_augmented = content
     
     search_links = []
     
@@ -894,7 +864,7 @@ def render_alert_card(alert, latest=False):
 <span class="tag tag-gray">{'REAL' if alert.get('source','real')=='real' else 'SIMULATED'}</span>
 <span style="color:#64748B; font-size:12px;">{ts_disp} ({tz_lbl})</span>
 </div>
-<div class="post-content">“{display_text(alert)}”</div>
+<div class="post-content">“{content_augmented}”</div>
 <div style="clear: both; margin-bottom: 8px;">{media_html}</div>
 {rec_html}
 <div style="margin-top:16px; padding-top:16px; border-top:1px solid #E2E8F0; clear: both; position: relative; z-index: 1;">
