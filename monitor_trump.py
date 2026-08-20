@@ -3,6 +3,9 @@ import json
 import re
 import time
 import hashlib
+import base64
+import io
+import mimetypes
 from datetime import datetime, timezone
 from openai import OpenAI
 from urllib.request import Request, urlopen
@@ -62,7 +65,14 @@ os.makedirs(VIDEOS_DIR, exist_ok=True)
 # SiliconFlow API Configuration
 SILICONFLOW_API_KEY = os.getenv("SILICONFLOW_API_KEY")
 BASE_URL = "https://api.siliconflow.cn/v1"
- 
+SILICONFLOW_TEXT_MODEL = os.getenv("SILICONFLOW_TEXT_MODEL", "Qwen/Qwen3.6-35B-A3B")
+# SiliconFlow OpenAI-compatible视觉模型；可通过环境变量切换到账号可用的更新模型。
+SILICONFLOW_VISION_MODEL = os.getenv(
+    "SILICONFLOW_VISION_MODEL",
+    "Qwen/Qwen3.6-35B-A3B",
+)
+# 直接传视频会明显增加请求体和耗时；超过此大小时自动使用关键帧。
+DIRECT_VIDEO_MAX_MB = float(os.getenv("SILICONFLOW_DIRECT_VIDEO_MAX_MB", "20"))
 
 HUGGINGFACE_API_KEY = os.getenv("HUGGINGFACE_API_KEY")
 # 默认使用 blip2-flan-t5-xxl，因为 blip-image-captioning-large 在推理 API 中不可用（404错误）
@@ -1296,13 +1306,16 @@ def ai_summarize_text(text, timeout=20):
                 http_client = None
         client = OpenAI(api_key=SILICONFLOW_API_KEY, base_url=BASE_URL, http_client=http_client)
         prompt = f"Summarize the following article in 3 bullet points and a 1-sentence thesis:\n\n{text[:6000]}"
-        resp = client.chat.completions.create(
-            model="deepseek-ai/DeepSeek-V3",
-            messages=[{"role": "system", "content": "Output concise plain text."},
-                      {"role": "user", "content": prompt}],
-            temperature=0.2,
-            max_tokens=256
-        )
+        summary_options = {
+            "model": SILICONFLOW_TEXT_MODEL,
+            "messages": [{"role": "system", "content": "Output concise plain text."},
+                         {"role": "user", "content": prompt}],
+            "temperature": 0.2,
+            "max_tokens": 256,
+        }
+        if "Qwen3.6" in SILICONFLOW_TEXT_MODEL:
+            summary_options["extra_body"] = {"enable_thinking": False}
+        resp = client.chat.completions.create(**summary_options)
         out = resp.choices[0].message.content or ""
         return out.strip()
     except Exception:
@@ -1321,10 +1334,183 @@ def get_recent_posts_context(limit=3):
         return "No recent posts available."
     return "No recent posts available."
 
+def _image_bytes_to_data_url(image_bytes, mime_type="image/jpeg"):
+    if not image_bytes:
+        return ""
+    return f"data:{mime_type};base64,{base64.b64encode(image_bytes).decode('ascii')}"
+
+def _normalize_image_for_vision(path_or_bytes, max_side=1280):
+    """Resize/compress an image into a vision-model friendly data URL."""
+    try:
+        if isinstance(path_or_bytes, (bytes, bytearray)):
+            raw = bytes(path_or_bytes)
+        else:
+            with open(path_or_bytes, "rb") as f:
+                raw = f.read()
+        if not raw or Image is None:
+            return ""
+        img = Image.open(io.BytesIO(raw)).convert("RGB")
+        w, h = img.size
+        if max(w, h) > max_side:
+            scale = max_side / float(max(w, h))
+            img = img.resize((max(1, int(w * scale)), max(1, int(h * scale))))
+        out = io.BytesIO()
+        img.save(out, format="JPEG", quality=84, optimize=True)
+        return _image_bytes_to_data_url(out.getvalue())
+    except Exception:
+        return ""
+
+def _video_to_data_url(path, max_mb=DIRECT_VIDEO_MAX_MB):
+    """Read a local video as a data URL for providers that support video_url."""
+    try:
+        if not path or not os.path.isfile(path):
+            return ""
+        if os.path.getsize(path) > float(max_mb) * 1024 * 1024:
+            print(f"[AI] ⚠ Video exceeds direct-upload limit ({max_mb:g} MB): {path}")
+            return ""
+        with open(path, "rb") as f:
+            raw = f.read()
+        if not raw:
+            return ""
+        mime_type = mimetypes.guess_type(path)[0] or "video/mp4"
+        return _image_bytes_to_data_url(raw, mime_type=mime_type)
+    except Exception as e:
+        print(f"[AI] ⚠ Direct video encoding failed: {e}")
+        return ""
+
+def _build_multimodal_parts(media, max_images=6, allow_direct_video=False):
+    """
+    Build OpenAI-compatible image/video parts from local media.
+    When allow_direct_video is true, videos are sent as video_url first;
+    callers can invoke this again with false to build a keyframe fallback.
+    """
+    parts = []
+    used = 0
+    seen_media = set()
+    for index, item in enumerate(media or [], start=1):
+        if used >= max_images:
+            break
+        if not isinstance(item, dict):
+            continue
+        raw_url = str(item.get("url") or item.get("preview_url") or "").strip()
+        preview = str(item.get("preview_url") or "").strip()
+        media_key = raw_url or preview
+        if media_key in seen_media:
+            continue
+        seen_media.add(media_key)
+        media_type = (item.get("type") or "").lower()
+        is_video = media_type in ("video", "gifv") or any(
+            ext in raw_url.lower() for ext in [".mp4", ".webm", ".mov", ".avi", ".mkv", "/videos/"]
+        )
+        local_path = raw_url if raw_url and os.path.exists(raw_url) else ""
+        if is_video:
+            if allow_direct_video and local_path:
+                video_url = _video_to_data_url(local_path)
+                if video_url:
+                    parts.append({"type": "text", "text": f"视频 {index}（完整视频）："})
+                    parts.append({"type": "video_url", "video_url": {"url": video_url}})
+                    used += 1
+                    continue
+            frames = []
+            if local_path and os.path.exists(local_path):
+                frames = _extract_video_keyframes_ffmpeg(local_path, num_frames=3)
+                if not frames and cv2 is not None:
+                    frames = _extract_video_keyframes(local_path, num_frames=3)
+            if frames:
+                for frame_index, frame_bytes in enumerate(frames, start=1):
+                    if used >= max_images:
+                        break
+                    data_url = _normalize_image_for_vision(frame_bytes)
+                    if data_url:
+                        parts.append({"type": "text", "text": f"视频 {index} 的关键帧 {frame_index}："})
+                        parts.append({"type": "image_url", "image_url": {"url": data_url}})
+                        used += 1
+                continue
+            fallback_path = preview if preview and os.path.exists(preview) else ""
+            if fallback_path:
+                data_url = _normalize_image_for_vision(fallback_path)
+                if data_url:
+                    parts.append({"type": "text", "text": f"视频 {index} 的预览帧："})
+                    parts.append({"type": "image_url", "image_url": {"url": data_url}})
+                    used += 1
+            continue
+        if not local_path:
+            continue
+        data_url = _normalize_image_for_vision(local_path)
+        if data_url:
+            parts.append({"type": "text", "text": f"图片 {index}："})
+            parts.append({"type": "image_url", "image_url": {"url": data_url}})
+            used += 1
+    return parts
+
+def _parse_json_model_output(content):
+    text = str(content or "").strip()
+    fence = chr(96) * 3
+    if text.startswith(fence):
+        text = text[len(fence):].lstrip()
+        if text.lower().startswith("json"):
+            text = text[4:].lstrip()
+        if text.endswith(fence):
+            text = text[:-len(fence)].rstrip()
+    return json.loads(text)
+
+def _normalize_ai_result(result):
+    """Apply conservative guardrails after the model returns JSON."""
+    if not isinstance(result, dict):
+        result = {}
+    out = dict(result)
+
+    def _number(value, default=None):
+        try:
+            text = str(value).strip().replace('%', '')
+            return float(text) if text else default
+        except Exception:
+            return default
+
+    impact_type = str(out.get("impact_type") or "unknown").strip().lower()
+    score = _number(out.get("market_impact_score"))
+    confidence = _number(out.get("confidence"))
+    if score is not None:
+        score = max(0.0, min(100.0, score if score > 1 else score * 100))
+    if confidence is not None:
+        confidence = max(0.0, min(1.0, confidence if confidence <= 1 else confidence / 100))
+
+    raw_impact = out.get("impact")
+    if isinstance(raw_impact, str):
+        impact = raw_impact.strip().lower() in {"true", "yes", "1"}
+    else:
+        impact = bool(raw_impact)
+    # Political-only posts and low scores must not become trade alerts merely
+    # because the model found a familiar ticker association.
+    if impact_type in {"political_only", "political", "noise", "personal"}:
+        impact = False
+    if score is not None and score < 60:
+        impact = False
+
+    assets = out.get("affected_assets") or []
+    if not isinstance(assets, list):
+        assets = [assets]
+    clean_assets = []
+    for asset in assets[:8]:
+        symbol = re.sub(r"[^A-Za-z0-9.\-]", "", str(asset).upper()).strip()
+        if symbol and re.fullmatch(r"[A-Z][A-Z0-9.\-]{0,7}", symbol) and symbol not in clean_assets:
+            clean_assets.append(symbol)
+
+    out["impact"] = impact
+    out["impact_type"] = impact_type
+    out["market_impact_score"] = round(score) if score is not None else None
+    out["confidence"] = round(confidence, 2) if confidence is not None else None
+    out["fact_check_status"] = str(out.get("fact_check_status") or "unverified").strip().lower()
+    out["affected_assets"] = clean_assets if impact else []
+    if not impact:
+        out["recommendation"] = "None"
+    return out
+
 def analyze_with_ai(post_content, media=None, retries=2, backoff=1.5):
     """
-    Analyzes the post content using DeepSeek model via SiliconFlow API.
-    Returns a dictionary with analysis results.
+    Analyze text posts with the text model and attached media with the
+    configured vision model via SiliconFlow. Videos are sent directly first;
+    failed direct-video requests fall back to keyframes and then text-only AI.
     """
     if not ENABLE_AI_ANALYSIS:
         return {
@@ -1348,103 +1534,46 @@ def analyze_with_ai(post_content, media=None, retries=2, backoff=1.5):
     downloaded_media_paths = []  # 收集所有下载的媒体文件路径
     try:
         arr = media or []
-        caption_cache = _load_media_caption_cache()
         if arr:
             lines = []
-            caps = []
-            image_count = 0
             for i, m in enumerate(arr):
-                t = (m.get("type") or "").lower()
-                # 检查URL字段来判断是否为视频（更准确）
-                url_field = m.get("url") or ""
-                is_video = t in ("video", "gifv") or any(ext in url_field.lower() for ext in ['.mp4', '.webm', '.mov', '.avi', '.mkv', '/videos/'])
-                
-                # 关键修复：对于视频，优先使用 url 字段（实际视频文件）
-                # preview_url 通常是视频的缩略图（图片），不是视频本身
-                if is_video:
-                    u = m.get("url") or ""
-                    pv = m.get("preview_url") or ""
-                    local_path = None
-                    if u and os.path.exists(u):
-                        local_path = u
-                    elif u:
-                        local_path = download_media(u, media_type='video', timeout=30, max_size_mb=100)
-                    if local_path:
-                        downloaded_media_paths.append(local_path)
-                        if local_path in caption_cache:
-                            cap = caption_cache.get(local_path) or ""
-                            display_url = local_path
-                            lines.append(f"[{image_count}] ({label}) {cap} | {display_url}")
-                            if cap:
-                                caps.append(cap)
-                            continue
-                    preview_local = None
-                    if pv and os.path.exists(pv):
-                        preview_local = pv
-                    elif pv:
-                        preview_local = download_media(pv, media_type='image', timeout=30, max_size_mb=10)
-                        if preview_local:
-                            downloaded_media_paths.append(preview_local)
-                    if preview_local:
-                        print(f"[AI][HF] ▶ Use video preview image for caption: {preview_local}")
-                        label = "image"
-                        cap = hf_caption_image(preview_local, timeout=10)
-                        display_url = preview_local
-                        image_count += 1
-                        lines.append(f"[{image_count}] ({label}) {cap} | {display_url}")
-                        if cap:
-                            caps.append(cap)
+                if not isinstance(m, dict):
                     continue
-                else:
-                    u = m.get("preview_url") or m.get("url") or ""
-                    local_path = None
-                    if u and os.path.exists(u):
-                        local_path = u
-                    elif u:
-                        local_path = download_media(u, media_type='image', timeout=30, max_size_mb=10)
-                    if local_path:
-                        downloaded_media_paths.append(local_path)
-                        if local_path in caption_cache:
-                            cap = caption_cache.get(local_path) or ""
-                            image_count += 1
-                            label = "image"
-                            display_url = local_path
-                            lines.append(f"[{image_count}] ({label}) {cap} | {display_url}")
-                            if cap:
-                                caps.append(cap)
-                            continue
-                
-                # 只处理图片，最多处理3张
-                if image_count >= 3:
-                    break
-                
-                if not is_video:
-                    image_count += 1
-                    label = "image"
-                    
-                    # 使用本地文件进行AI分析
-                    cap = ""
-                    if local_path and os.path.exists(local_path):
-                        # 使用本地文件路径
-                        cap = hf_caption_image(local_path, timeout=10)
-                    elif u:
-                        # 如果下载失败，回退到使用URL（向后兼容）
-                        cap = hf_caption_image(u, timeout=10)
-                    
-                    # 如果没有获取到caption，使用描述或默认标签
-                if not cap:
-                    d = (m.get("description") or "").strip()
-                    cap = d if d else label
-                    
-                    # 在context中显示本地路径（如果存在）
-                    display_url = local_path if local_path else u
-                    lines.append(f"[{image_count}] ({label}) {cap} | {display_url}")
-                if cap:
-                    caps.append(cap)
-            
+                t = (m.get("type") or "").lower()
+                raw_url = str(m.get("url") or "").strip()
+                preview_url = str(m.get("preview_url") or "").strip()
+                is_video = t in ("video", "gifv") or any(
+                    ext in raw_url.lower()
+                    for ext in (".mp4", ".webm", ".mov", ".avi", ".mkv", "/videos/")
+                )
+                media_url = raw_url or preview_url
+                media_type = "video" if is_video else "image"
+                local_path = None
+                if media_url and os.path.exists(media_url):
+                    local_path = media_url
+                elif media_url:
+                    local_path = download_media(
+                        media_url,
+                        media_type=media_type,
+                        timeout=30,
+                        max_size_mb=100 if is_video else 10,
+                    )
+                if local_path and local_path not in downloaded_media_paths:
+                    downloaded_media_paths.append(local_path)
+
+                description = (m.get("description") or "").strip()
+                display_url = local_path or media_url or preview_url
+                lines.append(
+                    f"[{i + 1}] ({media_type}) "
+                    f"{description or 'attached media will be inspected directly'} | {display_url}"
+                )
             if lines:
                 media_context = "\n".join(lines)
-                caption_text = " ".join(caps)
+                caption_text = " ".join(
+                    str(m.get("description") or "").strip()
+                    for m in arr
+                    if isinstance(m, dict) and str(m.get("description") or "").strip()
+                )
     except Exception as e:
         # 记录错误但继续处理
         print(f"Error processing media: {e}")
@@ -1499,31 +1628,10 @@ def analyze_with_ai(post_content, media=None, retries=2, backoff=1.5):
     # Fetch recent posts context (for trend analysis)
     recent_posts_context = get_recent_posts_context(limit=5)
 
+    # 媒体不再先经过旧的 Hugging Face caption 流程；图片直接进入视觉模型，
+    # 视频先抽取关键帧后进入同一个多模态请求，避免重复调用和错误 caption。
     media_multi = {}
     media_ai_summary = ""
-    try:
-        print("[AI] ▶ Media models: start")
-        print(f"[AI][HF] ▶ HF key present: {bool(HUGGINGFACE_API_KEY)}")
-        media_multi_out = analyze_local_media_for_alert({"local_media_paths": downloaded_media_paths})
-        media_multi = media_multi_out.get("media_multi_model") or {}
-        media_ai_summary = media_multi_out.get("media_ai_summary") or ""
-        # 如果本地媒体有摘要，将其注入 media_context，以便下游 prompt 使用
-        if media_ai_summary:
-            media_context = media_ai_summary
-            caption_text = media_ai_summary if not caption_text else f"{caption_text} {media_ai_summary}"
-            # 将摘要写回缓存，避免下次重复调用 HF
-            for p in downloaded_media_paths:
-                if p:
-                    try:
-                        # 简单写入缓存文件结构：不落盘单独文件，只在本次运行使用，保存由 save_alert 完成
-                        pass
-                    except Exception:
-                        pass
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        media_multi = {}
-        media_ai_summary = ""
     
     web_ai_summary = ""
     try:
@@ -1539,12 +1647,46 @@ def analyze_with_ai(post_content, media=None, retries=2, backoff=1.5):
         web_ai_summary = ""
         external_ai_summary = ""
 
+    # 图片直接使用视觉输入；视频优先完整发送，失败后重新构建关键帧输入。
+    vision_sources = []
+    for path in downloaded_media_paths:
+        if path and os.path.exists(path):
+            media_kind = "video" if any(
+                ext in path.lower() for ext in [".mp4", ".webm", ".mov", ".avi", ".mkv"]
+            ) else "image"
+            vision_sources.append({"type": media_kind, "url": path, "preview_url": path})
+    vision_sources.extend(arr)
+    direct_parts = _build_multimodal_parts(
+        vision_sources, max_images=6, allow_direct_video=True
+    )
+    keyframe_parts = _build_multimodal_parts(
+        vision_sources, max_images=6, allow_direct_video=False
+    )
+    direct_video_enabled = any(
+        part.get("type") == "video_url" for part in direct_parts
+    )
+    vision_parts = direct_parts or keyframe_parts
+    vision_enabled = bool(vision_parts)
+    has_video_sources = any(
+        isinstance(item, dict) and (
+            (item.get("type") or "").lower() in ("video", "gifv") or
+            any(ext in str(item.get("url") or "").lower()
+                for ext in (".mp4", ".webm", ".mov", ".avi", ".mkv", "/videos/"))
+        )
+        for item in vision_sources
+    )
+    analysis_model = SILICONFLOW_VISION_MODEL if vision_enabled else SILICONFLOW_TEXT_MODEL
+
     prompt = f"""
-    You are a senior Wall Street financial analyst (Hedge Fund level). Analyze the following social media post by Donald Trump.
-    
-    **OBJECTIVES:**
-    1. **Trend Analysis**: Use the "Recent Trump Posts" provided below to detect developing narratives (e.g., escalating attacks on a company, sustained crypto pumping).
-    2. **Specific Actionable Alpha**: Do NOT limit recommendations to generic ETFs (like SPY/XLK). You MUST recommend **specific single-name stocks** (e.g., TSLA, DJT, NVDA, XOM, COIN, GEO) if there is a logical thesis.
+    You are a conservative financial-news analyst. Analyze the following social media post by Donald Trump.
+    If attached images, a complete video, or video keyframes are present, inspect them directly. Do not rely only on captions.
+
+    **STRICT MARKET-IMPACT RULE:**
+    Set impact=true only when the post contains a plausible, direct and material causal path to a public company, industry, commodity, interest rate, tariff, regulation, sanction, government contract, or broad market. A political endorsement, local election graphic, insult, generic celebration, campaign slogan, or unverified image is impact=false by default. Political importance is not the same as tradable market impact.
+    It is correct to return an empty affected_assets array. Never invent a ticker to satisfy the format. Do not infer DJT, GEO, SPY, COIN, or any other ticker merely from Trump's endorsement or political affiliation.
+
+    **CONTEXT RULE:**
+    Use Recent Trump Posts only to reinforce an already direct market mechanism; recent posts must never create market impact by themselves.
     
     **INPUT DATA:**
     ---
@@ -1563,32 +1705,84 @@ def analyze_with_ai(post_content, media=None, retries=2, backoff=1.5):
     
     **RESPONSE FORMAT (JSON ONLY):**
     {{
-        "impact": boolean, // true if it likely affects the market
-        "reasoning": "string", // Concise thesis. Mention if this reinforces a recent trend from history. (max 50 words)
-        "affected_assets": ["list", "of", "tickers"], // Mix of Stocks & ETFs. E.g. ["TSLA", "RIVN", "KARS"]
+        "impact": boolean, // conservative tradable-market decision
+        "impact_type": "policy" | "company" | "industry" | "macro" | "political_only" | "noise" | "unknown",
+        "market_impact_score": 0-100,
+        "confidence": 0.0-1.0,
+        "fact_check_status": "verified" | "unverified" | "contradicted",
+        "reasoning": "string", // Concise thesis using both text and visual evidence. Mention if this reinforces a recent trend from history. (max 80 words)
+        "affected_assets": ["list", "of", "tickers"], // Empty unless a direct causal link is stated.
         "sentiment": "positive" | "negative" | "neutral",
-        "recommendation": "string" // ACTIONABLE. E.g., "Buy TSLA", "Short F", "Buy COIN", "Sell DIS". "None" if no clear trade.
+        "recommendation": "string", // Optional research reference. "None" if no clear trade.
+        "media_summary": "string" // What the attached image/video visibly shows and why it matters.
     }}
     """
 
     last_err = None
+    media_input_mode = "text"
     for attempt in range(int(retries) + 1):
         try:
-            print(f"[AI] ▶ DeepSeek request attempt {attempt+1}/{int(retries)+1}")
-            response = client.chat.completions.create(
-                model="deepseek-ai/DeepSeek-V3",
-                messages=[
-                    {"role": "system", "content": "You are a helpful financial assistant. You output valid JSON only."},
-                    {"role": "user", "content": prompt}
-                ],
-                response_format={"type": "json_object"},
-                temperature=0.3,
-                max_tokens=500
+            active_model = SILICONFLOW_TEXT_MODEL
+            active_parts = []
+            if direct_video_enabled and attempt == 0:
+                active_model = analysis_model
+                active_parts = direct_parts
+                media_input_mode = "direct_video"
+            elif vision_enabled and attempt == 0:
+                active_model = analysis_model
+                active_parts = keyframe_parts
+                media_input_mode = "keyframes" if has_video_sources else "image"
+            elif direct_video_enabled and attempt == 1:
+                active_model = analysis_model
+                active_parts = keyframe_parts
+                media_input_mode = "keyframes_fallback"
+            elif vision_enabled and attempt == 1 and not direct_video_enabled:
+                active_model = SILICONFLOW_TEXT_MODEL
+                active_parts = []
+                media_input_mode = "text_fallback"
+            elif vision_enabled:
+                active_model = SILICONFLOW_TEXT_MODEL
+                active_parts = []
+                media_input_mode = "text_fallback"
+            user_content = prompt
+            if active_parts:
+                user_content = [{"type": "text", "text": prompt}] + active_parts
+            messages = [
+                {
+                    "role": "system",
+                    "content": "You are a helpful financial assistant. Output valid JSON only.",
+                },
+                {"role": "user", "content": user_content},
+            ]
+            print(
+                f"[AI] ▶ {active_model} request attempt "
+                f"{attempt+1}/{int(retries)+1} multimodal={bool(active_parts)}"
             )
+            request_options = {
+                "model": active_model,
+                "messages": messages,
+                "temperature": 0.0,
+                "max_tokens": 900,
+            }
+            if "Qwen3.6" in active_model:
+                request_options["extra_body"] = {"enable_thinking": False}
+            try:
+                response = client.chat.completions.create(
+                    **request_options,
+                    response_format={"type": "json_object"},
+                )
+            except Exception:
+                # 部分视觉模型只支持普通 JSON 文本，不支持 response_format。
+                response = client.chat.completions.create(**request_options)
             
             result_text = response.choices[0].message.content
-            result_json = json.loads(result_text)
-            print("[AI] ✔ DeepSeek response received")
+            result_json = _normalize_ai_result(_parse_json_model_output(result_text))
+            print(f"[AI] ✔ {active_model} response received")
+
+            # 视觉模型能描述海报内容，但没有外部证据时不能证明海报中的
+            # “获胜/背书/政策已生效”等事实。避免把图像识别误标为已核验。
+            if vision_enabled and not (external_context or external_ai_summary):
+                result_json["fact_check_status"] = "unverified"
             
             # Inject external context summary into the result for transparency
             context_preview = "No external news found."
@@ -1608,7 +1802,10 @@ def analyze_with_ai(post_content, media=None, retries=2, backoff=1.5):
             result_json['media_used'] = bool(media_context and media_context != "No media attached.")
             result_json['media_caption_used'] = bool(caption_text)
             result_json['media_multi_model'] = media_multi
-            result_json['media_ai_summary'] = media_ai_summary
+            result_json['media_input_mode'] = media_input_mode
+            result_json['media_ai_summary'] = (
+                result_json.get("media_summary") or media_ai_summary
+            )
             result_json['web_ai_summary'] = web_ai_summary
             # #region agent log
             try:
@@ -2061,11 +2258,8 @@ def run_fetch_recent(limit=20, fast_init=False, force=False):
                         lp = download_media(u, media_type='video', timeout=30, max_size_mb=100)
                         if lp:
                             downloaded_paths.append(lp)
-                        if pv:
-                            ip = download_media(pv, media_type='image', timeout=30, max_size_mb=10)
-                            if ip:
-                                downloaded_paths.append(ip)
-                                media_for_ai.append({"type": "image", "url": ip, "preview_url": ip})
+                            # 将原视频交给 AI；不要只把缩略图当成视频分析输入。
+                            media_for_ai.append({"type": "video", "url": lp, "preview_url": pv})
                         continue
                     else:
                         u = m.get("preview_url") or m.get("url") or ""

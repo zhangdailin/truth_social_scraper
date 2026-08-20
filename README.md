@@ -29,6 +29,9 @@ pip install -r requirements.txt
 - `TRUTH_ACCOUNT_ID`：账号 ID（默认：`107780257626128497`）
 - `TRUTH_USERNAME`：用户名（默认：`realDonaldTrump`）
 - `SILICONFLOW_API_KEY`：用于调用 DeepSeek-V3 的 API Key
+- `SILICONFLOW_TEXT_MODEL`：文本分析模型（默认 `Qwen/Qwen3.6-35B-A3B`）
+- `SILICONFLOW_VISION_MODEL`：图片/视频多模态分析模型（默认 `Qwen/Qwen3.6-35B-A3B`）
+- `SILICONFLOW_DIRECT_VIDEO_MAX_MB`：直接上传视频的大小上限，超过后自动改用关键帧（默认 `20`）
 - `HUGGINGFACE_API_KEY`：用于调用 Hugging Face Inference 的 Token
 - `HUGGINGFACE_IMAGE_MODEL`：图片字幕模型（默认可用：`Salesforce/blip-image-captioning-large` 或 `nlpconnect/vit-gpt2-image-captioning`）
 - `SOCKS_PROXY`：socks5 代理（例如：`127.0.0.1:7890` 或 `socks5://127.0.0.1:7890`）

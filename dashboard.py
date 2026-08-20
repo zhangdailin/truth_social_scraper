@@ -2,18 +2,15 @@ import streamlit as st
 import json
 import time
 import os
-import pandas as pd
 import re
 import threading
 import socket
 import hashlib
 from datetime import datetime, timezone
 from urllib.parse import urlparse
+from html import escape
 from dotenv import load_dotenv
 
-# 并发控制：限制同时进行的自动图片搜索数量
-MAX_CONCURRENT_IMAGE_SEARCHES = 3
-_image_search_semaphore = threading.Semaphore(MAX_CONCURRENT_IMAGE_SEARCHES)
 from utils import (
     ALERTS_FILE, 
     describe_media, 
@@ -305,70 +302,94 @@ st.set_page_config(
 
 st.markdown("""
 <style>
+    *, *::before, *::after { box-sizing: border-box; }
+    html, body, #root, .stApp, [data-testid="stAppViewContainer"], section.main {
+        width: 100% !important;
+        max-width: 100% !important;
+        min-width: 0 !important;
+        margin: 0 !important;
+        overflow-x: hidden !important;
+    }
     html, body, [class*="css"] {
-        background: #F4F6FA;
+        background: #F8FAFC;
         color: #0F172A;
         font-family: "Inter", "Segoe UI", system-ui, -apple-system, sans-serif;
     }
-    .block-container { padding-top: 1.2rem !important; padding-bottom: 0 !important; max-width: 98% !important; }
+    .block-container {
+        width: 100% !important;
+        max-width: 900px !important;
+        margin: 0 auto !important;
+        padding-top: 0.75rem !important;
+        padding-bottom: 0 !important;
+    }
     h1, h2, h3 { color: #0F172A; font-weight: 700; letter-spacing: -0.01em; }
     hr { margin: 8px 0 !important; border-top: 1px solid #E2E8F0 !important; }
 
-    .topbar {
-        background: linear-gradient(120deg, #0b1220 0%, #1d4ed8 60%, #38bdf8 120%);
-        border-radius: 16px;
-        padding: 14px 18px;
-        color: #fff;
-        margin-bottom: 12px;
-        box-shadow: 0 10px 28px rgba(15,23,42,0.18);
-    }
-    .topbar h1 { color: #fff; margin: 0 !important; font-size: 26px; }
-    .topbar p { margin: 6px 0 0 0; color: rgba(255,255,255,0.82); font-size: 13px; }
-
-    .nav-shell {
-        background: #fff;
-        border: 1px solid #dbe4f3;
+    .app-header {
+        background: linear-gradient(135deg, #FFFFFF 0%, #F8FBFF 100%);
+        border: 1px solid #E2E8F0;
+        border-top: 3px solid #2563EB;
         border-radius: 14px;
-        padding: 10px 14px;
+        padding: 15px 18px;
         margin-bottom: 10px;
-        box-shadow: 0 4px 14px rgba(15, 23, 42, 0.05);
+        box-shadow: 0 6px 18px rgba(15, 23, 42, 0.05);
+        max-width: 760px;
+        margin-left: auto;
+        margin-right: auto;
     }
-    .nav-row { display:flex; justify-content:space-between; align-items:center; gap: 10px; flex-wrap: wrap; }
-    .nav-title { font-size: 15px; font-weight: 800; color: #0f172a; }
-    .nav-meta { font-size: 12px; color:#64748b; }
-
+    .app-header-row { display:flex; justify-content:space-between; align-items:center; gap:18px; flex-wrap:wrap; }
+    .brand-block { display:flex; align-items:center; gap:12px; min-width:0; }
+    .brand-mark {
+        width:42px; height:42px; border-radius:12px; flex-shrink:0;
+        display:flex; align-items:center; justify-content:center;
+        color:#fff; background:linear-gradient(135deg,#2563EB,#1E40AF);
+        font-size:14px; font-weight:900; letter-spacing:-0.04em;
+        box-shadow:0 6px 12px rgba(37,99,235,0.22);
+    }
+    .app-eyebrow { color:#2563EB; font-size:11px; font-weight:800; letter-spacing:0.04em; }
+    .app-title { color:#0F172A; font-size:23px; font-weight:800; letter-spacing:-0.025em; margin-top:1px; }
+    .app-subtitle { color:#64748B; font-size:13px; margin-top:3px; }
+    .header-status { text-align:right; }
+    .status-pill { display:inline-flex; align-items:center; gap:6px; padding:6px 10px; border-radius:999px; font-size:11px; font-weight:800; white-space:nowrap; }
+    .status-online { color:#047857; background:#ECFDF5; border:1px solid #A7F3D0; }
+    .status-offline { color:#B91C1C; background:#FEF2F2; border:1px solid #FECACA; }
+    .sync-meta { color:#64748B; font-size:11px; margin-top:6px; }
     .filter-shell {
         background: #ffffff;
-        border: 1px solid #dbe4f3;
+        border: 1px solid #E2E8F0;
         border-radius: 14px;
         padding: 10px 12px 4px;
         margin-bottom: 12px;
-        box-shadow: 0 5px 18px rgba(15, 23, 42, 0.06);
+        box-shadow: 0 5px 18px rgba(15, 23, 42, 0.04);
     }
+    .asset-chip { display:inline-block; padding:3px 8px; margin:3px 4px 0 0; border-radius:999px; color:#1D4ED8; background:#DBEAFE; font-size:11px; font-weight:800; }
 
-    .metric-container {
-        background: #FFFFFF;
-        border: 1px solid #E2E8F0;
-        border-radius: 10px;
-        padding: 14px;
-        text-align: center;
-        box-shadow: 0 2px 8px rgba(15, 23, 42, 0.05);
+    .social-feed { max-width: 720px; margin: 0 auto; }
+    .feed-pagination { max-width:720px; margin:18px auto 10px; }
+    .feed-page-info {
+        position: relative;
+        z-index: 5;
+        overflow: visible;
+        text-align:center;
+        color:#64748B;
+        font-size:12px;
+        padding-top:7px;
     }
-    .metric-value { font-size: 22px; font-weight: 800; color: #0F172A; }
-    .metric-label { font-size: 11px; color: #64748B; letter-spacing: 0.5px; text-transform: uppercase; }
-
     .hero-card, .feed-item {
         background: #fff;
-        border: 1px solid #dbe4f3;
-        border-radius: 16px;
-        padding: 14px;
+        border: 1px solid #E5E7EB;
+        border-radius: 12px;
+        padding: 0 0 14px;
         margin-bottom: 12px;
-        box-shadow: 0 8px 20px rgba(15, 23, 42, 0.06);
+        box-shadow: 0 1px 3px rgba(15, 23, 42, 0.04);
+        /* 股票走势图是卡片内的绝对定位悬浮层，不能被卡片裁切。媒体自身仍由
+           .media-item 负责 overflow:hidden，图片/视频圆角不会受影响。 */
+        overflow: visible;
     }
     .hero-alert-high { border-left: 5px solid #ef4444; }
     .hero-alert-low  { border-left: 5px solid #10b981; }
 
-    .feed-head { display:flex; align-items:flex-start; gap:10px; }
+    .feed-head { display:flex; align-items:flex-start; gap:10px; padding:14px 16px 0; }
     .avatar {
         width: 42px; height: 42px; border-radius: 50%; flex-shrink: 0;
         background: linear-gradient(135deg,#1e293b,#334155);
@@ -376,51 +397,113 @@ st.markdown("""
         border: 2px solid #e2e8f0;
     }
     .author-line { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
-    .author-name { font-weight: 800; color:#0f172a; }
+    .author-block { flex:1; min-width:0; }
+    .impact-pill { flex:0 0 auto; padding:5px 9px; border-radius:999px; font-size:10px; font-weight:850; white-space:nowrap; }
+    .impact-pill-high { color:#B91C1C; background:#FEF2F2; border:1px solid #FECACA; }
+    .impact-pill-low { color:#475569; background:#F1F5F9; border:1px solid #CBD5E1; }
+    .author-name { font-weight: 800; color:#111827; font-size:16px; }
+    .verified-badge { display:inline-flex; align-items:center; justify-content:center; width:16px; height:16px; border-radius:50%; color:#fff; background:#EC4899; font-size:10px; font-weight:900; }
+    .post-meta { color:#6B7280; font-size:13px; margin-top:2px; }
     .post-time { color:#64748b; font-size:12px; }
-    .post-content { font-size: 16px; line-height: 1.58; color: #1f2937; margin: 10px 0 8px; }
+    .post-content { font-size: 15px; line-height: 1.62; color: #1f2937; margin: 13px 16px 8px; white-space:pre-wrap; overflow-wrap:anywhere; }
+    .feed-media { margin: 14px 16px 0; }
+    .ai-note { position:relative; z-index:2; background:#F8FAFC; border:1px solid #E2E8F0; border-radius:10px; padding:11px 12px 10px; color:#475569; font-size:12px; line-height:1.5; margin:12px 16px 0; }
+    .ai-panel-head { display:flex; align-items:center; gap:7px; flex-wrap:wrap; padding-bottom:8px; border-bottom:1px solid #E2E8F0; }
+    .ai-label { color:#0F172A; font-size:12px; font-weight:850; }
+    .ai-label-mark { display:inline-flex; align-items:center; justify-content:center; width:20px; height:20px; margin-right:5px; border-radius:6px; color:#fff; background:#2563EB; font-size:9px; font-weight:900; }
+    .ai-type, .ai-confidence { color:#475569; background:#fff; border:1px solid #E2E8F0; border-radius:999px; padding:3px 7px; font-size:10px; font-weight:750; }
+    .ai-summary { color:#1E293B; font-size:13px; font-weight:700; line-height:1.5; padding:9px 0 7px; }
+    .ai-meta-row { position:relative; z-index:2; display:flex; align-items:center; gap:7px; flex-wrap:wrap; color:#64748B; font-size:11px; }
+    .ai-meta-label { color:#64748B; font-weight:750; }
+    .ai-reason { margin-top:9px; padding-top:9px; border-top:1px solid #E2E8F0; color:#475569; }
+    .ai-reason-label { display:block; color:#334155; font-size:11px; font-weight:850; margin-bottom:3px; }
+    .ai-media-summary { margin-top:9px; padding-top:9px; border-top:1px dashed #CBD5E1; color:#64748B; font-size:11px; line-height:1.55; }
+    .ai-details { margin-top:9px; padding-top:8px; border-top:1px solid #E2E8F0; }
+    .ai-details summary { cursor:pointer; color:#334155; font-size:11px; font-weight:850; list-style:none; }
+    .ai-details summary::-webkit-details-marker { display:none; }
+    .ai-details summary::before { content:'＋'; display:inline-block; margin-right:4px; color:#2563EB; font-weight:900; }
+    .ai-details[open] summary::before { content:'−'; }
+    .ai-details-body { padding-top:5px; color:#475569; line-height:1.6; }
 
-    .quote-box {
-        background: #f8fafc;
-        border: 1px solid #e2e8f0;
-        border-left: 3px solid #94a3b8;
-        border-radius: 10px;
-        padding: 8px 10px;
-        margin: 8px 0 0;
-        color: #334155;
-        font-size: 13px;
+    .media-grid {
+        margin: 0 0 8px;
+        display: grid;
+        gap: 2px;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        justify-content: stretch;
+        align-items: stretch;
+        overflow: hidden;
+        border-radius: 14px;
+        background: #E5E7EB;
     }
-
-    .tag { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 700; margin-right: 6px; }
-    .tag-red { background-color: #FEF2F2; color: #DC2626; border: 1px solid #FECACA; }
-    .tag-green { background-color: #ECFDF5; color: #059669; border: 1px solid #A7F3D0; }
-    .tag-gray { background-color: #F1F5F9; color: #475569; border: 1px solid #E2E8F0; }
-
-    .media-grid { margin-top: 10px; margin-bottom: 8px; display: grid; gap: 8px; grid-template-columns: repeat(auto-fit, minmax(var(--media-min, 180px), 1fr)); }
-    .media-item { position: relative; overflow: hidden; border-radius: 12px; border: 1px solid #E2E8F0; background: #0F172A; min-height: 120px; box-shadow: 0 6px 14px rgba(15, 23, 42, 0.12); }
-    .media-item img, .media-item video { width: 100%; height: auto; object-fit: cover; display: block; background: #0F172A; }
-    .media-item video { max-height: 300px; aspect-ratio: 16 / 9; }
-    .media-item img { aspect-ratio: 4 / 3; max-height: 340px; }
+    .media-grid.media-count-1 { grid-template-columns: minmax(0, 1fr); }
+    .media-grid.media-count-3,
+    .media-grid.media-count-4 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .media-item {
+        position: relative;
+        overflow: hidden;
+        width: 100%;
+        max-width: none;
+        min-height: 0;
+        border-radius: 0;
+        border: 0;
+        background: #E5E7EB;
+        box-shadow: none;
+    }
+    .media-item img, .media-item video {
+        width: 100%;
+        height: 100%;
+        min-height: 0;
+        max-height: none;
+        object-fit: cover;
+        display: block;
+        background: #E5E7EB;
+    }
+    .media-grid.media-count-1 .media-item { max-height: 560px; }
+    .media-grid.media-count-1 .media-item img,
+    .media-grid.media-count-1 .media-item video { height: auto; max-height: 560px; object-fit: contain; }
+    .media-grid.media-count-2 .media-item,
+    .media-grid.media-count-3 .media-item,
+    .media-grid.media-count-4 .media-item { aspect-ratio: 1.08 / 1; }
+    .media-grid.media-count-3 .media-item:first-child { grid-row: span 2; aspect-ratio: auto; }
+    .media-grid.media-count-3 .media-item:first-child img,
+    .media-grid.media-count-3 .media-item:first-child video { height: 100%; }
+    .social-feed .media-item { max-width:100%; }
+    .media-download {
+        position: absolute;
+        top: 8px;
+        right: 8px;
+        z-index: 3;
+        padding: 5px 9px;
+        border-radius: 6px;
+        color: #fff;
+        background: rgba(15, 23, 42, 0.78);
+        text-decoration: none;
+        font-size: 11px;
+        font-weight: 700;
+    }
+    .media-open {
+        position: absolute;
+        right: 8px;
+        bottom: 8px;
+        z-index: 3;
+        padding: 5px 8px;
+        border-radius: 6px;
+        color: #fff;
+        background: rgba(15, 23, 42, 0.78);
+        text-decoration: none;
+        font-size: 14px;
+        line-height: 1;
+    }
     .media-more { display: flex; align-items: center; justify-content: center; color: #1F2937; background: #E5E7EB; font-weight: 800; font-size: 16px; gap: 6px; }
     .media-more span { font-size: 12px; color: #475569; font-weight: 600; letter-spacing: 0.5px; }
+    .media-modal { display:none; position:fixed; z-index:1000; inset:0; background:rgba(0,0,0,0.75); }
+    .media-modal:target { display:block; }
+    .media-modal-content { position:relative; margin:40px auto; max-width:90%; max-height:85%; background:#000; border-radius:8px; padding:10px; }
+    .media-modal-close { position:absolute; right:10px; top:6px; color:#fff; font-size:24px; text-decoration:none; }
 
-    .collapsible {
-        margin-top: 10px;
-        border: 1px solid #e2e8f0;
-        border-radius: 10px;
-        background: #fbfdff;
-    }
-    .collapsible summary {
-        cursor: pointer;
-        padding: 8px 10px;
-        font-weight: 700;
-        color: #334155;
-        font-size: 13px;
-    }
-    .collapsible .inner { padding: 0 10px 10px; color:#475569; font-size:13px; line-height:1.6; }
-
-    .stock-tooltip { position: relative; display: inline-block; border-bottom: 2px dashed #F59E0B; cursor: help; font-weight: 700; color: #0F172A; }
-    .stock-tooltip .tooltip-content { visibility: hidden; width: 420px; background: #ffffff; text-align: center; border-radius: 10px; padding: 10px; position: absolute; z-index: 99999; top: 130%; left: 50%; margin-left: -210px; opacity: 0; transition: opacity 0.2s; box-shadow: 0 12px 24px rgba(15, 23, 42, 0.16); border: 1px solid #E2E8F0; color: #1F2937;}
+    .stock-tooltip { position: relative; z-index: 10; display: inline-block; border-bottom: 2px dashed #F59E0B; cursor: help; font-weight: 700; color: #0F172A; }
+    .stock-tooltip .tooltip-content { visibility: hidden; width: 420px; max-width: min(420px, calc(100vw - 24px)); background: #ffffff; text-align: center; border-radius: 10px; padding: 10px; position: absolute; z-index: 100000; top: calc(100% + 10px); left: 50%; margin-left: -210px; opacity: 0; pointer-events: none; transition: opacity 0.2s, visibility 0.2s; box-shadow: 0 12px 24px rgba(15, 23, 42, 0.16); border: 1px solid #E2E8F0; color: #1F2937;}
     .stock-tooltip:hover .tooltip-content { visibility: visible; opacity: 1; }
     .tooltip-image { width: 100%; height: auto; border-radius: 6px; }
     .stock-tooltip .tooltip-arrow { position: absolute; bottom: 100%; left: 50%; margin-left: -5px; border-width: 5px; border-style: solid; border-color: transparent transparent #E2E8F0 transparent; }
@@ -428,10 +511,186 @@ st.markdown("""
     #MainMenu, footer, header { visibility: hidden; }
     .stButton > button {
         background: #0F172A; color: #fff; border: 1px solid #0F172A; border-radius: 10px;
-        padding: 0.55rem 0.85rem; font-weight: 700; box-shadow: 0 6px 14px rgba(15,23,42,0.12);
+        min-height: 42px; padding: 0.55rem 0.85rem; font-weight: 700;
+        box-shadow: 0 6px 14px rgba(15,23,42,0.12); touch-action: manipulation;
     }
     .stTextInput input, .stTextArea textarea, .stSelectbox div[data-baseweb="select"] > div {
         border-radius: 10px !important; border: 1px solid #E2E8F0 !important; background: #fff !important;
+    }
+    .stTabs [data-baseweb="tab-list"] { gap: 6px; border-bottom: 1px solid #E2E8F0; }
+    .stTabs [data-baseweb="tab"] { padding: 10px 14px; color:#64748B; font-weight:700; }
+    .stTabs [aria-selected="true"] { color:#1D4ED8 !important; }
+    div[data-testid="stMetric"] { background:#fff; border:1px solid #E2E8F0; border-radius:12px; padding:12px; }
+    @media (max-width: 768px) {
+        html, body, #root, .stApp, [data-testid="stAppViewContainer"], section.main,
+        section.main > div, section.main > div > div {
+            width: 100% !important;
+            max-width: 100% !important;
+            min-width: 0 !important;
+            overflow-x: hidden !important;
+        }
+        .block-container {
+            width: 100% !important;
+            max-width: none !important;
+            padding: 0 12px 12px !important;
+        }
+        .app-header, .filter-shell, .hero-card,
+        .feed-pagination, .social-feed {
+            width: 100% !important;
+            max-width: none !important;
+            margin-left: 0 !important;
+            margin-right: 0 !important;
+        }
+        .app-header, .filter-shell {
+            border-radius: 12px !important;
+        }
+        .hero-card {
+            border-left-width: 4px;
+            border-right: 0 !important;
+            border-radius: 0 !important;
+            padding-left: 12px;
+            padding-right: 12px;
+        }
+        .feed-head { padding:13px 12px 0; }
+        .post-content { margin-left:12px; margin-right:12px; }
+        .feed-media { margin-left:12px; margin-right:12px; }
+        .ai-note { margin-left:12px; margin-right:12px; }
+        .header-status { text-align:left; width:100%; }
+        .app-header-row { gap:10px; }
+        [data-testid="stHorizontalBlock"] { gap:6px !important; }
+        [data-testid="stTextInput"] label, [data-testid="stSelectbox"] label { font-size:10px !important; }
+        .app-title { font-size:20px; }
+        .metric-value { font-size:18px; }
+        .post-content { font-size:14px; }
+        .media-grid { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; gap: 2px; border-radius: 12px; }
+        .media-grid.media-count-1 { grid-template-columns: minmax(0, 1fr) !important; }
+        .media-item { width: 100%; max-width: 100%; }
+        .media-item img, .media-item video { max-width: 100%; max-height: none; }
+        .media-grid.media-count-1 .media-item img,
+        .media-grid.media-count-1 .media-item video { max-height: 70vh; }
+        .stock-tooltip .tooltip-content {
+            position: fixed !important;
+            left: 8px !important;
+            right: 8px !important;
+            bottom: 12px !important;
+            top: auto !important;
+            width: auto !important;
+            max-width: none !important;
+            margin-left: 0 !important;
+        }
+        .stock-tooltip .tooltip-arrow { display:none; }
+        .feed-page-info {
+            position: relative;
+            z-index: 5;
+            overflow: visible !important;
+            white-space: normal;
+            font-size: 11px;
+            line-height: 1.35;
+            padding-top: 4px;
+        }
+        .feed-page-info .page-current,
+        .feed-page-info .page-total {
+            display: block;
+        }
+        /* 移动端分页按钮需要足够大的触摸命中区，避免首次点击只获得焦点。 */
+        [data-testid="stButton"] > button {
+            width: 100% !important;
+            min-height: 40px !important;
+            padding: 0 2px !important;
+            font-size: 12px !important;
+            white-space: nowrap !important;
+            touch-action: manipulation;
+            -webkit-tap-highlight-color: rgba(37, 99, 235, 0.18);
+        }
+        [data-testid="stSelectbox"] [role="combobox"] {
+            min-height: 40px !important;
+        }
+        /* Streamlit 在手机端默认会把 columns 纵向堆叠；只恢复分页这一行的三列布局。 */
+        [data-testid="stHorizontalBlock"]:has(.feed-pagination-hook) {
+            display: flex !important;
+            flex-direction: row !important;
+            flex-wrap: nowrap !important;
+            align-items: center !important;
+            gap: 6px !important;
+        }
+        [data-testid="stHorizontalBlock"]:has(.feed-pagination-hook) > [data-testid="stColumn"] {
+            min-width: 0 !important;
+        }
+        [data-testid="stHorizontalBlock"]:has(.feed-pagination-hook) > [data-testid="stColumn"]:nth-child(1),
+        [data-testid="stHorizontalBlock"]:has(.feed-pagination-hook) > [data-testid="stColumn"]:nth-child(3) {
+            flex: 0 0 20% !important;
+            width: 20% !important;
+        }
+        [data-testid="stHorizontalBlock"]:has(.feed-pagination-hook) > [data-testid="stColumn"]:nth-child(2) {
+            flex: 0 0 60% !important;
+            width: 60% !important;
+        }
+    }
+
+    /* 跟随系统深色模式：保证 Streamlit 原生控件和自定义信息流都有足够对比度。 */
+    @media (prefers-color-scheme: dark) {
+        html, body, #root, .stApp, [data-testid="stAppViewContainer"],
+        section.main, section.main > div, .block-container {
+            background: #0B1120 !important;
+            color: #E5E7EB !important;
+        }
+        [data-testid="stHeader"] { background: #0B1120 !important; }
+        h1, h2, h3, p, label, [data-testid="stMarkdownContainer"] {
+            color: #E5E7EB;
+        }
+        hr { border-top-color: #334155 !important; }
+
+        .app-header, .filter-shell, .hero-card, .feed-item {
+            background: #111827 !important;
+            border-color: #334155 !important;
+            color: #E5E7EB !important;
+            box-shadow: 0 8px 24px rgba(0, 0, 0, 0.24);
+        }
+        .app-header { background: linear-gradient(135deg, #111827 0%, #172554 100%) !important; }
+        .app-title, .author-name, .ai-label, .ai-summary, .stock-tooltip {
+            color: #F8FAFC !important;
+        }
+        .app-subtitle, .app-eyebrow, .sync-meta, .post-meta, .post-time,
+        .feed-page-info, .ai-meta-row, .ai-meta-label, .ai-media-summary {
+            color: #CBD5E1 !important;
+        }
+        .post-content { color: #F1F5F9 !important; }
+        .ai-note { background: #172033 !important; border-color: #334155 !important; color: #E2E8F0 !important; }
+        .ai-panel-head, .ai-details { border-color: #334155 !important; }
+        .ai-type, .ai-confidence { background: #1E293B !important; border-color: #475569 !important; color: #E2E8F0 !important; }
+        .ai-details summary, .ai-details-body, .ai-reason, .ai-reason-label { color: #CBD5E1 !important; }
+        .impact-pill-high { background: #451A1A !important; border-color: #7F1D1D !important; color: #FCA5A5 !important; }
+        .impact-pill-low { background: #1E293B !important; border-color: #475569 !important; color: #CBD5E1 !important; }
+        .asset-chip { background: #172554 !important; color: #BFDBFE !important; }
+
+        .stTextInput label, .stTextArea label, .stSelectbox label { color: #CBD5E1 !important; }
+        .stTextInput input, .stTextArea textarea,
+        .stSelectbox div[data-baseweb="select"] > div,
+        [data-testid="stSelectbox"] [role="combobox"] {
+            background: #1E293B !important;
+            color: #F8FAFC !important;
+            border-color: #475569 !important;
+            -webkit-text-fill-color: #F8FAFC !important;
+        }
+        .stTextInput input::placeholder, .stTextArea textarea::placeholder { color: #94A3B8 !important; opacity: 1; }
+        [data-baseweb="popover"], [role="listbox"], [role="option"] {
+            background: #1E293B !important;
+            color: #F8FAFC !important;
+        }
+        [role="option"]:hover, [aria-selected="true"] { background: #334155 !important; color: #FFFFFF !important; }
+        .stButton > button { background: #2563EB !important; border-color: #3B82F6 !important; color: #FFFFFF !important; }
+        .stButton > button:disabled { background: #1E293B !important; border-color: #334155 !important; color: #64748B !important; }
+
+        .media-grid { background: #334155 !important; }
+        .media-item, .media-item img, .media-item video { background: #020617 !important; }
+        .media-more { background: #1E293B !important; color: #F8FAFC !important; }
+        .media-more span { color: #CBD5E1 !important; }
+        .media-modal-content { background: #020617 !important; }
+        .stock-tooltip .tooltip-content {
+            background: #1E293B !important;
+            border-color: #475569 !important;
+            color: #F8FAFC !important;
+        }
     }
 </style>
 """, unsafe_allow_html=True)
@@ -466,14 +725,6 @@ document.addEventListener('DOMContentLoaded', function(){
 })();
 </script>
 """, unsafe_allow_html=True)
-
-st.markdown(
-    """<div class="topbar">
-    <h1>Trump Truth Social Monitor</h1>
-    <p>Latest posts, media gallery, and AI market notes — optimized for quick scanning.</p>
-    </div>""",
-    unsafe_allow_html=True,
-)
 
 # ==========================================
 # 3. DATA LOADING
@@ -547,7 +798,22 @@ def build_media_html(media, max_images=4, width=220, post_id=None):
             local_media_paths = get_local_media_paths_by_post_id(post_id)
             if local_media_paths:
                 pass
-        
+
+        # 视频的本地映射历史上可能同时包含视频缩略图；缩略图只用于
+        # 下载/兼容回退，不应作为帖子媒体再次展示。混合图文帖子仍保留真实图片。
+        media_is_video = lambda item: (
+            (str(item.get("type") or "").lower() in ("video", "gifv")) or
+            any(ext in str(item.get("url") or "").lower()
+                for ext in (".mp4", ".webm", ".mov", ".avi", ".mkv", "/videos/"))
+        ) if isinstance(item, dict) else False
+        has_video_media = any(media_is_video(item) for item in media)
+        has_image_media = any(not media_is_video(item) for item in media)
+        if local_media_paths and has_video_media and not has_image_media:
+            local_media_paths = [
+                path for path in local_media_paths
+                if any(ext in path.lower() for ext in (".mp4", ".webm", ".mov", ".avi", ".mkv"))
+            ]
+
         # 如果有本地文件，优先使用本地文件（完全使用映射，不再处理media列表，避免重复）
         if local_media_paths:
             # 计算实际可显示媒体数量（保留视频+图片，不再因有视频而隐藏图片）
@@ -566,17 +832,17 @@ def build_media_html(media, max_images=4, width=220, post_id=None):
                     api_path = f"{api_base_url}/api/media/{rel_path_normalized}"
                     is_video = any(ext in local_path.lower() for ext in ['.mp4', '.webm', '.mov', '.avi', '.mkv'])
                     if is_video:
+                        video_mime = _video_mime_type(local_path)
                         items.append(
-                            f'<div class="media-item" style="position: relative; margin-bottom: 8px;">'
-                            f'<video playsinline controls crossorigin="anonymous" style="width: 100%; max-height: 280px; display: block;">'
-                            f'<source src="{api_path}" type="video/mp4"></video>'
-                            f'<div style="position: absolute; top: 6px; right: 6px; z-index: 10;">'
-                            f'<a href="{api_path}" download style="background: rgba(0,0,0,0.65); color: white; padding: 4px 8px; border-radius: 4px; text-decoration: none; font-size: 11px;">⬇ 下载</a>'
-                            f'</div></div>'
+                            f'<div class="media-item media-video">'
+                            f'<video playsinline controls preload="metadata" crossorigin="anonymous">'
+                            f'<source src="{api_path}" type="{video_mime}"></video>'
+                            f'<a class="media-download" href="{api_path}" download>⬇ 下载</a>'
+                            f'</div>'
                         )
                     else:
                         items.append(
-                            f'<div class="media-item" style="cursor: zoom-in;">'
+                            f'<div class="media-item media-image" style="cursor: zoom-in;">'
                             f'<img src="{api_path}" alt="" loading="lazy" decoding="async" {img_onerror} />'
                             f'</div>'
                         )
@@ -587,7 +853,8 @@ def build_media_html(media, max_images=4, width=220, post_id=None):
                 remaining = max(0, displayable_count - len(items))
                 if remaining > 0:
                     items.append(f'<div class="media-item media-more">+{remaining} <span>more</span></div>')
-                return f'<div id="media-grid-{post_id}" class="media-grid" style="--media-min:{min_col}px;">' + ''.join(items) + '</div>'
+                media_class = f"media-grid media-count-{min(4, max(1, len(items)))}"
+                return f'<div id="media-grid-{post_id}" class="{media_class}" style="--media-min:{min_col}px;">' + ''.join(items) + '</div>'
         
         # 如果没有通过推文ID找到本地文件，使用media列表中的URL（向后兼容）
         if not local_media_paths:
@@ -625,22 +892,22 @@ def build_media_html(media, max_images=4, width=220, post_id=None):
 
 
                 if is_video and vsrc:
-                    # 使用简化的视频播放器（避免复杂的script导致渲染问题）
+                    video_mime = _video_mime_type(vsrc)
                     video_id = f"plyr-video-{hashlib.md5(vsrc.encode()).hexdigest()[:8]}"
                     modal_id = f"media-modal-{post_id}-{len(items)}"
-                    # 视频不显示预览图（poster）
                     video_html = (
-                        f'<a href="#{modal_id}" class="media-item" style="position: relative; margin-bottom: 10px; max-width: 500px; isolation: isolate; clear: both; cursor: zoom-in;">'
-                        f'<video id="{video_id}" playsinline controls crossorigin="anonymous" style="width: 100%; max-height: 300px; display: block; margin: 0; padding: 0;">'
-                        f'<source src="{vsrc}" type="video/mp4"></video>'
-                        f'<div style="position: absolute; top: 5px; right: 5px; z-index: 10;"><a href="{vsrc}" download style="background: rgba(0,0,0,0.7); color: white; padding: 5px 10px; border-radius: 3px; text-decoration: none; font-size: 12px; display: inline-block;">⬇ 下载</a></div>'
-                        f'</a>'
+                        f'<div class="media-item media-video">'
+                        f'<video id="{video_id}" playsinline controls preload="metadata" crossorigin="anonymous">'
+                        f'<source src="{vsrc}" type="{video_mime}"></video>'
+                        f'<a class="media-download" href="{vsrc}" download>⬇ 下载</a>'
+                        f'<a class="media-open" href="#{modal_id}" aria-label="放大视频">⛶</a>'
+                        f'</div>'
                     )
                     items.append(video_html)
                     modals.append(
                         f'<div id="{modal_id}" class="media-modal"><div class="media-modal-content">'
                         f'<a href="#" class="media-modal-close">×</a>'
-                        f'<video controls style="width:100%; max-height:80vh; background:#000;"><source src="{vsrc}" type="video/mp4"></video>'
+                        f'<video controls preload="metadata" style="width:100%; max-height:80vh; background:#000;"><source src="{vsrc}" type="{video_mime}"></video>'
                         f'</div></div>'
                     )
                 else:
@@ -648,7 +915,7 @@ def build_media_html(media, max_images=4, width=220, post_id=None):
                     if src:
                         modal_id = f"media-modal-{post_id}-{len(items)}"
                         items.append(
-                            f'<a href="#{modal_id}" class="media-item" style="cursor: zoom-in;">'
+                            f'<a href="#{modal_id}" class="media-item media-image" style="cursor: zoom-in;">'
                             f'<img src="{src}" alt="" loading="lazy" decoding="async" {img_onerror} />'
                             f'</a>'
                         )
@@ -670,211 +937,124 @@ def build_media_html(media, max_images=4, width=220, post_id=None):
         if remaining > 0:
             items.append(f'<div class="media-item media-more">+{remaining} <span>more</span></div>')
 
-        style = '''
-        <style>
-          .media-modal { display:none; position:fixed; z-index:1000; left:0; top:0; width:100%; height:100%; background:rgba(0,0,0,0.75); }
-          .media-modal:target { display:block; }
-          .media-modal-content { position:relative; margin:40px auto; max-width:90%; max-height:85%; background:#000; border-radius:8px; padding:10px; }
-          .media-modal-close { position:absolute; right:10px; top:6px; color:#fff; font-size:24px; text-decoration:none; }
-        </style>
-        '''
-        return style + (f'<div id="media-grid-{post_id}" class="media-grid" style="--media-min:{min_col}px;">' + ''.join(items) + '</div>') + ''.join(modals)
+        media_class = f"media-grid media-count-{min(4, max(1, len(items)))}"
+        return f'<div id="media-grid-{post_id}" class="{media_class}" style="--media-min:{min_col}px;">' + ''.join(items) + '</div>' + ''.join(modals)
     except Exception:
         return ""
 
 def display_text(item):
     try:
         c = (item.get('content') or '').strip()
+        # 媒体帖子的占位内容不是正文，不在信息流重复显示。
+        if re.fullmatch(r"\[(?:图片|视频)\]\s*\d+\s*(?:张|个)", c):
+            return ""
+        # 搜索关键词是后台上下文，不是特朗普的帖子正文。
+        if c.lower().startswith("keywords:"):
+            return ""
         if c:
             return c
-        arr = item.get('media') or []
-        return describe_media(arr)
+        # 媒体专属帖子不再把“[图片] 1 张”伪装成正文，
+        # 避免在媒体卡片上重复显示媒体描述。
+        return ""
     except Exception:
         return item.get('content','')
 
-def render_recommendation(ai_analysis):
-    rec = ai_analysis.get('recommendation', 'None')
-    if not rec or rec == "None":
-        return ""
-    assets = ai_analysis.get('affected_assets', [])
-    try:
-        rec_with_tooltips = inject_stock_tooltips(rec, assets)
-    except Exception:
-        rec_with_tooltips = rec
-    return f"""<div style="margin-top:12px; padding:12px; background-color:#FEF3C7; border-left:4px solid #F59E0B; border-radius:4px;">
-<strong style="color:#B45309;">💰 Trading Recommendation:</strong> 
-<span style="color:#92400E; font-weight:600;">{rec_with_tooltips}</span>
-</div>"""
+def _video_mime_type(value):
+    """根据本地路径或远程 URL 返回正确的视频 MIME 类型。"""
+    raw = str(value or "").split("?", 1)[0].lower()
+    ext = os.path.splitext(raw)[1]
+    return {
+        ".mp4": "video/mp4",
+        ".m4v": "video/mp4",
+        ".webm": "video/webm",
+        ".mov": "video/quicktime",
+        ".mkv": "video/x-matroska",
+        ".avi": "video/x-msvideo",
+        ".ogv": "video/ogg",
+    }.get(ext, "video/mp4")
 
-
-def metric_card(label, value, color=None):
-    """Lightweight metric card HTML to avoid repeated multiline snippets."""
-    color_style = f' style="color: {color}"' if color else ""
-    return (
-        '<div class="metric-container">'
-        f'<div class="metric-label">{label}</div>'
-        f'<div class="metric-value"{color_style}>{value}</div>'
-        "</div>"
-    )
-
-def build_search_links(alert):
-    """
-    生成搜索链接（文本搜索）
-    返回HTML字符串
-    注意：图片搜索已改为自动执行，不再显示按钮
-    """
-    from urllib.parse import quote
-    
-    content = display_text(alert)
-    content_augmented = content
-    
-    search_links = []
-    
-    # 文本内容搜索链接
-    if content and content.strip():
-        # 截取前100个字符作为搜索关键词
-        search_text = content[:100].strip()
-        encoded_text = quote(search_text)
-        
-        # 谷歌搜索
-        google_search_url = f"https://www.google.com/search?q={encoded_text}"
-        search_links.append(f'<a href="{google_search_url}" target="_blank" style="margin-right:8px; color:#3B82F6; text-decoration:none; font-size:11px;">🔍 Google搜索</a>')
-        
-        # 必应搜索
-        bing_search_url = f"https://www.bing.com/search?q={encoded_text}"
-        search_links.append(f'<a href="{bing_search_url}" target="_blank" style="margin-right:8px; color:#3B82F6; text-decoration:none; font-size:11px;">🔍 Bing搜索</a>')
-    
-    # 不再显示图片搜索按钮，改为自动执行
-    
-    if search_links:
-        return '<div style="margin-top:6px; padding-top:6px; border-top:1px solid #E2E8F0;">' + ''.join(search_links) + '</div>'
-    return ''
-
-def perform_auto_image_search(alert):
-    """
-    自动执行图片搜索（如果有图片）
-    返回搜索结果字符串
-    在后台线程中执行，避免阻塞
-    """
-    try:
-        media_list = alert.get('media') or []
-        if not media_list:
-            return None
-        
-        api_base_url = get_api_base_url()
-        post_id = str(alert.get('id', ''))
-        
-        # 获取第一个图片的URL
-        image_url = None
-        for m in media_list:
-            img_url = m.get("url") or m.get("preview_url") or ""
-            if img_url:
-                if img_url.startswith('/api/media/'):
-                    image_url = f"{api_base_url}{img_url}"
-                elif img_url.startswith('http://') or img_url.startswith('https://'):
-                    image_url = img_url
-                else:
-                    if post_id:
-                        local_paths = get_local_media_paths_by_post_id(post_id)
-                        for local_path in local_paths:
-                            if os.path.exists(local_path):
-                                is_video = any(ext in local_path.lower() for ext in ['.mp4', '.webm', '.mov', '.avi', '.mkv'])
-                                if not is_video:
-                                    rel_path = os.path.relpath(local_path, MEDIA_DIR)
-                                    rel_path_normalized = rel_path.replace('\\', '/').lstrip('/')
-                                    image_url = f"{api_base_url}/api/media/{rel_path_normalized}"
-                                    break
-                if image_url:
-                    break
-        
-        if not image_url:
-            return None
-        
-        # 调用图片搜索 API（使用 urllib 而不是 requests，避免额外依赖）
-        try:
-            from urllib.parse import quote
-            from urllib.request import urlopen, Request
-            from utils import _setup_proxy
-            import time
-            import json as json_lib
-            import os
-            
-            encoded_url = quote(image_url)
-            search_url = f"{api_base_url}/api/image-search/result?image_url={encoded_url}"
-            
-            _setup_proxy()
-            req = Request(search_url, headers={"User-Agent": "Mozilla/5.0"})
-            # 增加超时时间，因为 OCR 和搜索可能需要较长时间
-            # OCR API 可能需要90秒，加上图片下载和搜索，总共可能需要120秒
-            with urlopen(req, timeout=120) as response:
-                import json
-                data = json.loads(response.read().decode('utf-8'))
-                
-                if data.get('success') and data.get('results'):
-                    return data.get('results')
-        except Exception as e:
-            error_type = type(e).__name__
-            error_msg = str(e)
-            is_timeout = "timeout" in error_msg.lower() or "timed out" in error_msg.lower()
-            print(f"[Auto Image Search] 搜索失败: {e}")
-        
-        return None
-    except Exception as e:
-        print(f"[Auto Image Search] 错误: {e}")
-        return None
+def render_asset_chips(assets):
+    """Render affected assets with a hover chart, matching the original dashboard behavior."""
+    chips = []
+    seen = set()
+    for asset in assets or []:
+        symbol = re.sub(r"[^A-Za-z0-9.\-]", "", str(asset).strip().upper())
+        if not symbol or symbol in seen or not re.fullmatch(r"[A-Z0-9][A-Z0-9.\-]{0,11}", symbol):
+            continue
+        seen.add(symbol)
+        chart_html = get_chart_image_html(symbol)
+        chips.append(
+            f'<span class="stock-tooltip asset-chip">{escape(symbol)}'
+            f'<div class="tooltip-content">{chart_html}</div>'
+            f'<div class="tooltip-arrow"></div></span>'
+        )
+    return "".join(chips) or '<span style="color:#64748B;">暂无明确资产</span>'
 
 def render_alert_card(alert, latest=False):
     ai = alert.get('ai_analysis', {}) or {}
     is_high = ai.get('impact', False)
     impact_class = "hero-alert-high" if is_high else "hero-alert-low"
-    impact_label = '🚨 HIGH MARKET IMPACT' if is_high else '✅ LOW MARKET IMPACT'
+    impact_label = '高影响' if is_high else '低影响'
     tz_lbl = local_tz_label()
     ts_disp = to_local_str(pick_ts(alert))
     post_id = str(alert.get('id', ''))
-    media_html = build_media_html(alert.get('media'), 5 if latest else 4, 220 if latest else 180, post_id=post_id)
+    media_candidates = alert.get('media') or []
+    local_media_count = len(get_local_media_paths_by_post_id(post_id)) if post_id else 0
+    media_limit = max(1, len(media_candidates), local_media_count)
+    media_html = build_media_html(media_candidates, media_limit, 220 if latest else 180, post_id=post_id)
 
-    content = (display_text(alert) or '').strip() or 'No content.'
+    content = (display_text(alert) or '').strip()
     try:
         content_augmented = inject_stock_tooltips(content, ai.get('affected_assets', []) or [])
     except Exception:
         content_augmented = content
+    content_block = f'<div class="post-content">{content_augmented}</div>' if content_augmented else ''
 
-    reasoning = (ai.get('reasoning') or 'Analysis pending...').strip()
-    recommendation = (ai.get('recommendation') or '').strip()
-    source_text = 'REAL' if alert.get('source', 'real') == 'real' else 'SIMULATED'
+    reasoning = (ai.get('reasoning') or 'AI 分析尚未完成。').strip()
+    sentiment = (ai.get('sentiment') or '未判定').strip()
+    assets = [str(asset).strip().upper() for asset in (ai.get('affected_assets', []) or []) if str(asset).strip()]
+    asset_html = render_asset_chips(assets[:8])
 
-    quote_context = (ai.get('external_context_used', '') or '').strip()
-    if ' | ' in quote_context:
-        quote_context = quote_context.split(' | ')[0]
-    if len(quote_context) > 180:
-        quote_context = quote_context[:180] + '...'
-
-    rec_html = render_recommendation(ai) if recommendation and recommendation != 'None' else '<div class="inner" style="padding:0 10px 10px;color:#64748b;">No concrete trade suggestion from upstream model.</div>'
-    media_summary = (ai.get('media_ai_summary', '') or '').strip() or 'No media analysis available.'
-
-    return f"""<div class="hero-card {impact_class}">
+    media_summary = (ai.get('media_ai_summary', '') or '').strip()
+    impact_summary = 'AI 判断该内容可能造成短期市场波动。' if is_high else 'AI 暂未发现明显的市场影响信号。'
+    impact_type_labels = {
+        'policy': '政策', 'company': '公司', 'industry': '行业',
+        'macro': '宏观', 'political_only': '仅政治', 'noise': '噪声',
+        'personal': '个人言论', 'unknown': '未分类',
+    }
+    impact_type = impact_type_labels.get(str(ai.get('impact_type') or 'unknown').lower(), '未分类')
+    confidence = ai.get('confidence')
+    confidence_text = f"{float(confidence) * 100:.0f}%" if isinstance(confidence, (int, float)) else '—'
+    media_block = f'<div class="feed-media">{media_html}</div>' if media_html else ''
+    media_analysis_block = (
+        f'<details class="ai-details"><summary>查看媒体观察</summary><div class="ai-details-body">{escape(media_summary)}</div></details>'
+        if media_summary and media_candidates else ''
+    )
+    return f"""<div class="hero-card social-feed {impact_class}">
 <div class="feed-head">
-  <div class="avatar">TS</div>
-  <div style="flex:1; min-width:0;">
+  <div class="avatar">DT</div>
+  <div class="author-block">
     <div class="author-line">
-      <span class="author-name">@realDonaldTrump</span>
-      <span class="tag {'tag-red' if is_high else 'tag-green'}">{impact_label}</span>
-      <span class="tag tag-gray">{source_text}</span>
+      <span class="author-name">Donald J. Trump</span>
+      <span class="verified-badge">✓</span>
     </div>
-    <div class="post-time">{ts_disp} ({tz_lbl})</div>
-    <div class="post-content">{content_augmented}</div>
+    <div class="post-meta">@realDonaldTrump · {ts_disp} ({tz_lbl})</div>
   </div>
+  <span class="impact-pill {'impact-pill-high' if is_high else 'impact-pill-low'}">{impact_label}</span>
 </div>
-<div style="margin-top:6px;">{media_html}</div>
-{f'<div class="quote-box"><strong>Quoted context</strong><br/>{quote_context}</div>' if quote_context else ''}
-<details class="collapsible">
-  <summary>🧠 上游AI分析</summary>
-  <div class="inner">{reasoning}<br/><br/><strong>Media:</strong> {media_summary}</div>
-</details>
-<details class="collapsible">
-  <summary>💹 市场观点建议</summary>
-  {rec_html}
-</details>
+{content_block}
+{media_block}
+<div class="ai-note">
+  <div class="ai-panel-head">
+    <div class="ai-label"><span class="ai-label-mark">AI</span>判断</div>
+    <span class="ai-type">{impact_type}</span>
+    <span class="ai-confidence">置信度 {confidence_text}</span>
+  </div>
+  <div class="ai-summary">{impact_summary}</div>
+  <div class="ai-meta-row"><span class="ai-meta-label">情绪</span>{escape(sentiment)} <span class="ai-meta-label">影响资产</span>{asset_html}</div>
+  <details class="ai-details"><summary>查看判断依据</summary><div class="ai-details-body">{escape(reasoning)}</div></details>
+  {media_analysis_block}
+</div>
 </div>"""
 
 # ==========================================
@@ -1218,14 +1398,12 @@ alerts = st.session_state.get('cached_alerts', [])
 
 if 'initial_fetch_done' not in st.session_state:
     st.session_state['initial_fetch_done'] = False
-# Auto-refresh 设置（分钟级，默认5分钟）
-if 'refresh_rate_minutes' not in st.session_state:
-    st.session_state['refresh_rate_minutes'] = 5  # 默认5分钟
-# 固定数据拉取间隔（根据refresh_rate_minutes动态调整）
-# 确保check_interval_seconds始终与refresh_rate_minutes同步
-refresh_rate_minutes_current = st.session_state.get('refresh_rate_minutes', 5)
+# 自动刷新固定为 1 分钟，不在页面显示可调控件。
+st.session_state['refresh_rate_minutes'] = 1
+# 固定数据拉取间隔
+refresh_rate_minutes_current = 1
 check_interval_seconds_expected = int(refresh_rate_minutes_current) * 60
-# 如果check_interval_seconds与refresh_rate_minutes不同步，更新它
+    # 如果 check_interval_seconds 与固定刷新间隔不同步，更新它
 if st.session_state.get('check_interval_seconds', 0) != check_interval_seconds_expected:
     st.session_state['check_interval_seconds'] = check_interval_seconds_expected
 # 使用JavaScript实现自动刷新（不依赖外部包）
@@ -1392,101 +1570,45 @@ if alerts:
         st.session_state['last_played_alert_id'] = latest_alert['id']
 
 # ==========================================
-# 处理图片搜索结果（从 sessionStorage 读取）
-# ==========================================
-# 使用 JavaScript 检查 sessionStorage 并设置到 session_state
-st.components.v1.html("""
-<script>
-(function() {
-    // 检查 sessionStorage 中是否有图片搜索结果
-    const alertId = sessionStorage.getItem('image_search_alert_id');
-    const result = sessionStorage.getItem('image_search_result_' + alertId);
-    
-    if (alertId && result) {
-        // 通过 URL 参数传递（因为 Streamlit 无法直接访问 sessionStorage）
-        const params = new URLSearchParams(window.location.search);
-        params.set('image_search_alert_id', alertId);
-        // 如果结果太长，截断（URL 参数有长度限制）
-        const truncatedResult = result.length > 2000 ? result.substring(0, 2000) + '...' : result;
-        params.set('image_search_result', truncatedResult);
-        
-        // 只在第一次加载时设置
-        if (!params.has('image_search_processed')) {
-            params.set('image_search_processed', '1');
-            window.location.search = params.toString();
-        }
-    }
-})();
-</script>
-""", height=0)
-
-# 检查 URL 参数中是否有图片搜索结果
-if 'image_search_alert_id' in st.query_params and 'image_search_result' in st.query_params:
-    alert_id = st.query_params.get('image_search_alert_id')
-    result = st.query_params.get('image_search_result')
-    if alert_id and result:
-        cache_key = f'image_search_{alert_id}'
-        st.session_state[cache_key] = result
-        # 清除 URL 参数（避免重复处理）
-        if 'image_search_processed' in st.query_params:
-            # 保留其他参数，只移除图片搜索相关的参数
-            new_params = dict(st.query_params)
-            new_params.pop('image_search_alert_id', None)
-            new_params.pop('image_search_result', None)
-            new_params.pop('image_search_processed', None)
-            st.query_params.clear()
-            for k, v in new_params.items():
-                st.query_params[k] = v
-
-# ==========================================
 # 4. DASHBOARD HEADER & CONTROLS
 # ==========================================
 
-# Top Layout: Title (Left) + Controls (Right)
-c_header, c_control = st.columns([0.75, 0.25])
+# 统一的应用头部：品牌与服务状态
+api_started = st.session_state.get('api_server_started', False)
+api_error = st.session_state.get('api_error')
+api_status_text = "API 在线" if api_started else "API 离线"
+status_class = "status-online" if api_started else "status-offline"
+_now_local = datetime.now(timezone.utc).astimezone()
+_tz_label = local_tz_label()
 
-with c_header:
-    st.markdown("# 🦅 Trump Truth Social Monitor")
-    st.markdown("Real-time surveillance of Truth Social posts with **AI-driven market impact analysis**.")
-    st.caption("Powered by **DeepSeek-V3** via SiliconFlow")
-    
-    # API Server 状态显示（紧凑布局）
-    api_started = st.session_state.get('api_server_started', False)
-    api_error = st.session_state.get('api_error')
-    api_status = "🟢 Running" if api_started else "🔴 Stopped"
-    
-    if api_started:
-        api_url = get_api_base_url()
-        st.caption(f"🔌 API Server: {api_status} | 📍 [{api_url}]({api_url}) | 📚 [Docs]({api_url}/docs)")
-    elif api_error:
-        st.caption(f"🔌 API Server: {api_status} | ⚠️ {api_error}")
-    else:
-        st.caption(f"🔌 API Server: {api_status}")
+st.markdown(
+    f"""<div class="app-header">
+    <div class="app-header-row">
+      <div class="brand-block">
+        <div class="brand-mark">TS</div>
+        <div>
+          <div class="app-eyebrow">TRUTH SOCIAL · LIVE</div>
+          <div class="app-title">特朗普动态监控</div>
+          <div class="app-subtitle">@realDonaldTrump · 帖子与市场影响</div>
+        </div>
+      </div>
+      <div class="header-status">
+        <span class="status-pill {status_class}">● 实时连接</span>
+        <div class="sync-meta">每分钟更新 · {_now_local.strftime('%H:%M:%S')} {_tz_label}</div>
+      </div>
+    </div>
+    </div>""",
+    unsafe_allow_html=True,
+)
+if api_error:
+    st.warning(f"API 连接异常：{api_error}")
 
-with c_control:
-    st.markdown("**⚙️ System Control**")
-    # Auto-refresh 设置为分钟级（1-60分钟，默认5分钟）
-    old_rate = st.session_state.get("refresh_rate_minutes", 5)
-    refresh_rate_minutes = st.slider(
-        "Auto-refresh (minutes)", 
-        min_value=1, 
-        max_value=60, 
-        value=int(st.session_state.get("refresh_rate_minutes", 5)),
-        step=1,
-        help="页面自动刷新间隔（1-60分钟）",
-        key="refresh_slider"  # 添加key避免重复渲染
-    )
-    # 保存到 session_state，确保刷新后保持
-    new_rate = int(refresh_rate_minutes)
-    old_rate_value = st.session_state.get('refresh_rate_minutes', 5)
-    st.session_state['refresh_rate_minutes'] = int(refresh_rate_minutes)
-    # 转换为秒数用于实际刷新
-    refresh_rate_sec = refresh_rate_minutes * 60
-    st.session_state['refresh_rate_sec'] = refresh_rate_sec
-    st.session_state['check_interval_seconds'] = refresh_rate_sec
-    _now_local = datetime.now(timezone.utc).astimezone()
-    _tz_label = local_tz_label()
-    st.success(f"● Online | {_now_local.strftime('%H:%M:%S')} ({_tz_label})")
+# 自动刷新固定为 1 分钟，页面不显示刷新控件。
+refresh_rate_minutes = 1
+refresh_rate_sec = 60
+st.session_state['refresh_rate_minutes'] = refresh_rate_minutes
+st.session_state['refresh_rate_sec'] = refresh_rate_sec
+st.session_state['check_interval_seconds'] = refresh_rate_sec
 
 # ==========================================
 # 定时刷新检查（在刷新率滑块更新之后执行，确保使用最新的check_interval_seconds值）
@@ -1522,203 +1644,107 @@ if not st.session_state.get('is_fetching', False) and time_elapsed >= check_inte
             # 页面会在下一次用户交互或JavaScript自动刷新时更新
             # 不再调用 st.rerun()，让页面正常渲染，JavaScript会自动刷新
 
-st.markdown("""<div class='nav-shell'><div class='nav-row'><div><div class='nav-title'>🏠 Truth Feed</div><div class='nav-meta'>Social-style stream · Auto-synced with local API/media map</div></div><div class='nav-meta'>Tabs: Feed · Archive · Gallery · Settings</div></div></div>""", unsafe_allow_html=True)
-
-# Metrics Grid
-# 重新从session_state读取alerts，确保使用最新的数据（可能在定时刷新逻辑中已更新）
+# ==========================================
+# SOCIAL FEED
+# ==========================================
+# 主页面直接展示全部动态，图片和视频跟随帖子内联显示。
 alerts = st.session_state.get('cached_alerts', [])
-# 使用真正最新的告警（alerts[0]），即使它没有内容
-latest = alerts[0] if alerts else None
-alerts_vis = [a for a in alerts if str(display_text(a) or '').strip()]
 
-st.markdown("<div class='filter-shell'>", unsafe_allow_html=True)
-f_col1, f_col2, f_col3, f_col4 = st.columns([0.34, 0.22, 0.22, 0.22])
-feed_search = f_col1.text_input("🔎 Search in feed", value=st.session_state.get('feed_search', ''), key='feed_search')
-feed_impact = f_col2.selectbox("Impact", ["All", "High", "Low"], index=0, key='feed_impact_filter')
-feed_source = f_col3.selectbox("Source", ["All", "REAL", "SIMULATED"], index=0, key='feed_source_filter')
-feed_media = f_col4.selectbox("Media", ["All", "With media", "Text only"], index=0, key='feed_media_filter')
-st.markdown("</div>", unsafe_allow_html=True)
-
-if latest:
-    high_impact_count = sum(1 for a in alerts if a.get('ai_analysis', {}).get('impact'))
-    
-    c1, c2, c3, c4 = st.columns(4)
-    latest_ai = latest.get('ai_analysis', {}) or {}
-    impact = "HIGH" if latest_ai.get('impact') else "LOW"
-    impact_color = "#EF4444" if latest_ai.get('impact') else "#10B981"
-
-    # 计算时间差并格式化
-    def format_time_ago(minutes):
-        """格式化时间差：60分钟内显示分钟，60分钟以上显示小时+分钟"""
-        if minutes < 0:
-            return "刚刚"
-        if minutes < 60:
-            return f"{minutes}分钟"
-        hours = minutes // 60
-        mins = minutes % 60
-        if mins == 0:
-            return f"{hours}小时"
-        return f"{hours}小时{mins}分钟"
-
-    try:
-        _lts = pick_ts(latest)
-        _ts = datetime.fromisoformat(_lts.replace('Z','+00:00'))
-        if _ts.tzinfo is None:
-            _ts = _ts.replace(tzinfo=timezone.utc)
-        _age_min2 = int((datetime.now(timezone.utc) - _ts.astimezone(timezone.utc)).total_seconds() / 60)
-        time_ago_str = format_time_ago(_age_min2)
-    except Exception:
-        _age_min2 = 0
-        time_ago_str = "未知"
-
-    metric_payloads = [
-        ("Monitored Posts", len(alerts), None),
-        ("High Impact Alerts", high_impact_count, "#EF4444" if high_impact_count > 0 else "#0F172A"),
-        ("Latest Impact", impact, impact_color),
-        ("Time Ago", time_ago_str, None),
-    ]
-
-    for col, payload in zip((c1, c2, c3, c4), metric_payloads):
-        label, value, color = payload
-        with col:
-            st.markdown(metric_card(label, value, color), unsafe_allow_html=True)
-
-    st.markdown("<br>", unsafe_allow_html=True)
-
-    # HERO SECTION (Latest Post) - 使用真正最新的告警
-    # 注意：如果 slider 刚刚改变，上面的 st.stop() 会阻止执行到这里
-    st.markdown(render_alert_card(latest, latest=True), unsafe_allow_html=True)
-    
-    # FEED SECTION
-    c_feed_title, c_feed_sort = st.columns([0.8, 0.2])
-    with c_feed_title:
-        st.subheader("📜 Recent Posts")
-    
-    # List Layout - 结合顶部过滤器，模拟社交平台信息流
-    feed_pool = alerts[1:] if len(alerts) > 1 else []
-
-    def _feed_match(alert):
-        ai = alert.get('ai_analysis', {}) or {}
-        impact_val = 'High' if ai.get('impact') else 'Low'
-        source_val = 'REAL' if alert.get('source', 'real') == 'real' else 'SIMULATED'
-        has_media = bool(alert.get('media'))
-        blob = ' '.join([
-            (display_text(alert) or ''),
-            (ai.get('reasoning') or ''),
-            ' '.join(map(str, ai.get('affected_assets', []) or []))
-        ]).lower()
-        if feed_search and feed_search.lower().strip() not in blob:
-            return False
-        if feed_impact != 'All' and impact_val != feed_impact:
-            return False
-        if feed_source != 'All' and source_val != feed_source:
-            return False
-        if feed_media == 'With media' and not has_media:
-            return False
-        if feed_media == 'Text only' and has_media:
-            return False
-        return True
-
-    _feed = [a for a in feed_pool if _feed_match(a)][:8]
-    if not _feed:
-        st.info('No posts matched current filter conditions.')
-    for _i, alert in enumerate(_feed):
-        st.markdown(render_alert_card(alert, latest=False), unsafe_allow_html=True)
-        if _i < len(_feed) - 1:
-            st.divider()
-
-    st.markdown("---")
-    tab_archive, tab_gallery, tab_settings = st.tabs(["📚 Archive", "🖼️ Gallery", "⚙️ Settings"])
-    with tab_archive:
-        historical = alerts[6:] if len(alerts) > 6 else []
-        f1, f2, f3 = st.columns([0.5, 0.25, 0.25])
-        search_text = f1.text_input("Search text", key="archive_search", placeholder="Filter content, assets, reasoning…")
-        sentiment_filter = f2.selectbox("Sentiment", ["All", "Positive", "Neutral", "Negative"], index=0)
-        impact_filter = f3.selectbox("Impact", ["All", "High", "Low"], index=0)
-        v1, v2 = st.columns([0.5, 0.5])
-        view_mode = v1.radio("View mode", ["Cards", "Table"], horizontal=True, key="archive_view")
-        page_size = v2.selectbox("Rows per page", [10, 20, 50], index=1, key="archive_page_size")
-        def _match(alert):
-            ai = alert.get('ai_analysis', {}) or {}
-            sent = (ai.get('sentiment') or '-').lower()
-            impact_val = "high" if ai.get('impact') else "low"
-            if sentiment_filter != "All" and sentiment_filter.lower() not in sent:
-                return False
-            if impact_filter != "All" and impact_filter.lower() != impact_val:
-                return False
-            if search_text:
-                needle = search_text.lower().strip()
-                text_blob = " ".join([(display_text(alert) or ""), ai.get('reasoning', '') or "", " ".join(map(str, ai.get('affected_assets', []) or []))]).lower()
-                if needle and needle not in text_blob:
-                    return False
-            return True
-        filtered = [a for a in historical if _match(a)]
-        total = len(filtered)
-        if 'archive_page' not in st.session_state:
-            st.session_state['archive_page'] = 1
-        pages = max(1, (total + page_size - 1) // page_size)
-        cur = min(max(int(st.session_state['archive_page']), 1), pages)
-        cols_nav = st.columns([0.2, 0.6, 0.2])
-        if cols_nav[0].button("◀ Prev", disabled=(cur <= 1)):
-            cur = max(1, cur - 1)
-        if cols_nav[2].button("Next ▶", disabled=(cur >= pages)):
-            cur = min(pages, cur + 1)
-        st.session_state['archive_page'] = cur
-        start = (cur - 1) * page_size
-        end = start + page_size
-        slice_alerts = filtered[start:end]
-        st.caption(f"Page {cur} / {pages} · Showing {len(slice_alerts)} of {total} filtered · {len(historical)} total")
-        if not slice_alerts:
-            st.info("No posts match the current filters.")
-        elif view_mode == "Cards":
-            for _i, alert in enumerate(slice_alerts):
-                st.markdown(render_alert_card(alert, latest=False), unsafe_allow_html=True)
-                
-                if _i < len(slice_alerts) - 1:
-                    st.divider()
-        else:
-            def _trim(text, n=240):
-                text = text or ""
-                return text if len(text) <= n else text[: n - 1] + "…"
-            df = pd.DataFrame([
-                {
-                    "Date": to_local_str(pick_ts(a)),
-                    "Impact": "High" if a.get('ai_analysis', {}).get('impact') else "Low",
-                    "Sentiment": a.get('ai_analysis', {}).get('sentiment', '-'),
-                    "Assets": ", ".join(map(str, a.get('ai_analysis', {}).get('affected_assets', []) or [])) or "-",
-                    "Content": _trim(display_text(a)),
-                    "Reasoning": _trim(a.get('ai_analysis', {}).get('reasoning', '-'), 180),
-                }
-                for a in slice_alerts
-            ])
-            st.dataframe(df, width='stretch')
-    with tab_gallery:
-        st.subheader("🖼️ Media Gallery")
-        gallery_media = []
-        for a in alerts[:20]:
-            gallery_media.extend(a.get('media') or [])
-        gallery_html = build_media_html(gallery_media, max_images=12, width=180)
-        if gallery_html:
-            st.markdown(gallery_html, unsafe_allow_html=True)
-        else:
-            st.info("No media available.")
-    with tab_settings:
-        st.subheader("⚙️ System Settings")
-        st.caption("Adjust refresh rate and view API status")
-        st.write(f"API Base URL: {get_api_base_url()}")
-        st.write(f"Alerts file: {ALERTS_FILE}")
-        st.write(f"Unified JSON: {get_api_base_url()}/api/export/dashboard")
-else:
-    st.info("System initializing... Waiting for first data fetch.")
-
-# Footer
-st.markdown("<br><br><br>", unsafe_allow_html=True)
-st.markdown(
-    """
-    <div style="text-align: center; color: #94a3b8; font-size: 12px; padding: 20px;">
-        © 2025 Trump Truth Social Monitor. All rights reserved. <br>
-        Powered by DeepSeek-V3 & SiliconFlow
-    </div>
-    """,
-    unsafe_allow_html=True
+f_col1, f_col2, f_col3 = st.columns([0.52, 0.24, 0.24])
+feed_search = f_col1.text_input(
+    "搜索",
+    value=st.session_state.get('feed_search', ''),
+    key='feed_search',
+    placeholder="搜索正文、资产或 AI 判断",
 )
+feed_impact = f_col2.selectbox(
+    "影响",
+    ["全部", "高影响", "低影响"],
+    index=0,
+    key='feed_impact_filter',
+)
+feed_media = f_col3.selectbox(
+    "媒体",
+    ["全部", "含媒体", "纯文本"],
+    index=0,
+    key='feed_media_filter',
+)
+
+def _social_match(alert):
+    ai = alert.get('ai_analysis', {}) or {}
+    impact_val = '高影响' if ai.get('impact') else '低影响'
+    has_media = bool(alert.get('media'))
+    blob = ' '.join([
+        (display_text(alert) or ''),
+        (ai.get('reasoning') or ''),
+        ' '.join(map(str, ai.get('affected_assets', []) or [])),
+    ]).lower()
+    if feed_search and feed_search.lower().strip() not in blob:
+        return False
+    if feed_impact != '全部' and impact_val != feed_impact:
+        return False
+    if feed_media == '含媒体' and not has_media:
+        return False
+    if feed_media == '纯文本' and has_media:
+        return False
+    return True
+
+filtered_alerts = [a for a in alerts if _social_match(a)]
+page_size = int(st.session_state.get('social_page_size', 10))
+total_filtered = len(filtered_alerts)
+total_pages = max(1, (total_filtered + page_size - 1) // page_size)
+filter_signature = (
+    str(feed_search or '').strip(),
+    feed_impact,
+    feed_media,
+)
+if st.session_state.get('social_filter_signature') != filter_signature:
+    st.session_state['social_filter_signature'] = filter_signature
+    st.session_state['social_page'] = 1
+
+current_page = int(st.session_state.get('social_page', 1))
+current_page = min(max(current_page, 1), total_pages)
+st.session_state['social_page'] = current_page
+
+page_start = (current_page - 1) * page_size
+page_alerts = filtered_alerts[page_start:page_start + page_size]
+if not filtered_alerts:
+    st.info("没有符合当前条件的动态。")
+else:
+    for _i, alert in enumerate(page_alerts):
+        st.markdown(
+            render_alert_card(alert, latest=(current_page == 1 and _i == 0)),
+            unsafe_allow_html=True,
+        )
+
+# 分页固定放在动态列表底部，避免打断阅读。
+st.markdown("<div class='feed-pagination'></div>", unsafe_allow_html=True)
+pager_left, pager_info, pager_right = st.columns([0.20, 0.60, 0.20])
+with pager_left:
+    if st.button("上一条", disabled=(current_page <= 1), use_container_width=True, key="social_prev"):
+        st.session_state['social_page'] = current_page - 1
+        st.rerun()
+with pager_info:
+    st.markdown('<span class="feed-pagination-hook" aria-hidden="true"></span>', unsafe_allow_html=True)
+    st.markdown(
+        f'<div class="feed-page-info"><span class="page-current">第 {current_page} / {total_pages} 页</span><span class="page-total">共 {total_filtered} 条动态</span></div>',
+        unsafe_allow_html=True,
+    )
+with pager_right:
+    if st.button("下一条", disabled=(current_page >= total_pages), use_container_width=True, key="social_next"):
+        st.session_state['social_page'] = current_page + 1
+        st.rerun()
+
+# 每页数量单独放在分页按钮下一行，避免在窄屏上挤压页码状态。
+_, pager_size_col, _ = st.columns([0.36, 0.28, 0.36])
+with pager_size_col:
+    selected_page_size = st.selectbox(
+        "每页显示",
+        [10, 20, 50],
+        index=[10, 20, 50].index(page_size) if page_size in [10, 20, 50] else 0,
+        key="social_page_size",
+        label_visibility="collapsed",
+    )
+    if int(selected_page_size) != page_size:
+        st.session_state['social_page'] = 1
+        st.rerun()
