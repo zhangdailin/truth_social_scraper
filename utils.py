@@ -16,6 +16,50 @@ ALERTS_FILE = os.path.join(PROJECT_ROOT, "market_alerts.json")
 # 媒体文件推文ID映射文件（记录 post_id -> 本地文件路径列表的映射）
 MEDIA_MAPPING_FILE = os.path.join(PROJECT_ROOT, "media_mapping.json")
 DASHBOARD_JSON_FILE = os.path.join(PROJECT_ROOT, "dashboard_data.json")
+MEDIA_DIR = os.path.join(PROJECT_ROOT, "media")
+
+
+def local_media_api_path(path):
+    """Return a safe /api/media path for an existing file inside MEDIA_DIR."""
+    if not path:
+        return ""
+    try:
+        media_root = os.path.realpath(MEDIA_DIR)
+        real_path = os.path.realpath(os.fspath(path))
+        if not os.path.isfile(real_path) or os.path.commonpath([media_root, real_path]) != media_root:
+            return ""
+        rel = os.path.relpath(real_path, media_root).replace("\\", "/")
+        return f"/api/media/{rel.lstrip('/')}"
+    except (OSError, TypeError, ValueError):
+        return ""
+
+
+def media_type_for_path(path):
+    lower = str(path or "").lower()
+    return "video" if any(lower.endswith(ext) for ext in (".mp4", ".webm", ".mov", ".avi", ".mkv", ".gif")) else "image"
+
+
+def serialize_local_media(media_list, local_paths):
+    """Replace attachment URLs with safe local URLs while preserving metadata."""
+    attachments = media_list or []
+    valid = [local_media_api_path(p) for p in (local_paths or [])]
+    valid = [p for p in valid if p]
+    if not valid:
+        return attachments
+    converted = []
+    for index, item in enumerate(attachments):
+        new_item = dict(item) if isinstance(item, dict) else {}
+        if index < len(valid):
+            api_path = valid[index]
+            new_item["url"] = api_path
+            new_item["preview_url"] = api_path
+            new_item["type"] = media_type_for_path(local_paths[index])
+            new_item.setdefault("original_url", (item.get("url") or item.get("preview_url")) if isinstance(item, dict) else "")
+        converted.append(new_item)
+    for index in range(len(attachments), len(valid)):
+        api_path = valid[index]
+        converted.append({"url": api_path, "preview_url": api_path, "type": media_type_for_path(local_paths[index])})
+    return converted
 
 
 def load_media_mapping():

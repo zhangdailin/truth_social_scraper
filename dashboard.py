@@ -19,6 +19,7 @@ from utils import (
     to_local_str, 
     PROJECT_ROOT,
     get_media_paths_by_post_id,
+    serialize_local_media,
 )
 
 # 简易缓存与跨会话抓取锁（依赖 PROJECT_ROOT，因此放在 utils 导入之后）
@@ -1113,28 +1114,9 @@ def convert_media_urls_to_local(media_list, post_id=None):
     if not media_list:
         return media_list
     
-    # 优先通过推文ID从映射中获取本地文件路径
-    if post_id:
         local_media_paths = get_media_paths_by_post_id(post_id)
         if local_media_paths:
-            # 如果有本地文件，直接转换为API路径
-            converted = []
-            for local_path in local_media_paths:
-                if not os.path.exists(local_path):
-                    continue
-                rel_path = os.path.relpath(local_path, MEDIA_DIR)
-                rel_path_normalized = rel_path.replace('\\', '/')
-                api_path = f'/api/media/{rel_path_normalized}'
-                
-                # 判断是视频还是图片
-                is_video = any(ext in local_path.lower() for ext in ['.mp4', '.webm', '.mov', '.avi', '.mkv'])
-                
-                converted.append({
-                    'url': api_path,
-                    'preview_url': api_path,
-                    'type': 'video' if is_video else 'image'
-                })
-            
+            converted = serialize_local_media(media_list, local_media_paths)
             if converted:
                 return converted
     

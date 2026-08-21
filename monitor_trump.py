@@ -41,6 +41,7 @@ from utils import (
     fetch_truth_posts,
     normalize_iso,
     save_post_media_mapping,
+    serialize_local_media,
     get_media_paths_by_post_id,
     _setup_proxy,
 )
@@ -213,7 +214,9 @@ def download_media(url, media_type='image', timeout=30, max_size_mb=50):
             "Referer": "https://truthsocial.com/",
             "Connection": "keep-alive",
         }
-        
+        if TRUTH_COOKIE:
+            headers["Cookie"] = TRUTH_COOKIE
+
         # 下载文件
         max_size_bytes = max_size_mb * 1024 * 1024
         request = Request(url, headers=headers)
@@ -339,60 +342,30 @@ def _validate_file_content(file_bytes, media_type):
     """
     if not file_bytes or len(file_bytes) < 12:
         return False
-    
-    # 视频文件魔数检查
+
     if media_type == 'video':
-        # MP4文件: ftyp box at offset 4
+        # ISO Base Media File Format: bounded ftyp box with printable brands.
         if file_bytes[4:8] == b'ftyp':
-            # 检查brand (mp41, isom, avc1等)
-            brand = file_bytes[8:12]
-            if brand in [b'mp41', b'isom', b'avc1', b'iso2', b'mp42']:
-                return True
-        
-        # WebM文件: 以 1A 45 DF A3 开头
+            box_size = int.from_bytes(file_bytes[0:4], 'big')
+            if box_size >= 16 and box_size <= 4096 and box_size <= len(file_bytes):
+                brands = [file_bytes[8:12]]
+                brands.extend(file_bytes[offset:offset + 4] for offset in range(16, min(box_size, len(file_bytes)), 4))
+                if any(len(brand) == 4 and all(32 <= byte <= 126 for byte in brand) for brand in brands):
+                    return True
+
         if file_bytes[0:4] == b'\x1a\x45\xdf\xa3':
             return True
-        
-        # AVI文件: 以 RIFF 开头，然后是 AVI
         if file_bytes[0:4] == b'RIFF' and file_bytes[8:12] == b'AVI ':
             return True
-        
-        # MOV文件: ftyp box
         if file_bytes[4:8] == b'ftyp':
             return True
-        
-        print(f"[Validate] ⚠️ Video file magic number not recognized, but may still be valid")
-        # 如果无法识别，检查是否包含常见的视频数据模式
-        # 至少检查文件不是HTML错误页面
-        if file_bytes[:100].startswith(b'<html') or file_bytes[:100].startswith(b'<!DOCTYPE'):
-            print(f"[Validate] ❌ File appears to be HTML, not video")
+
+        prefix = file_bytes[:500].lstrip().lower()
+        if prefix.startswith((b'<html', b'<!doctype')):
             return False
-        
-        # 如果文件足够大且不是文本，可能是有效的视频文件
-        # 但首先检查是否是图片（可能被误判为视频）
-        if len(file_bytes) >= 2:
-            # 检查是否是JPEG（可能被误判）
-            if file_bytes[0:2] == b'\xff\xd8':
-                print(f"[Validate] ⚠️ File appears to be JPEG, not video")
-                return False
-            # 检查是否是PNG
-            if file_bytes[0:4] == b'\x89PNG':
-                print(f"[Validate] ⚠️ File appears to be PNG, not video")
-                return False
-        
-        # 如果文件足够大且不是文本/图片，可能是有效的视频文件
-        if len(file_bytes) > 1000:
-            # 检查是否包含HTML标签（错误页面）
-            try:
-                text_start = file_bytes[:500].decode('utf-8', errors='ignore')
-                if '<html' in text_start.lower() or '<!doctype' in text_start.lower():
-                    print(f"[Validate] ❌ File appears to be HTML error page")
-                    return False
-            except:
-                pass
-            return True
-        
-        return False
+        if file_bytes[0:2] == b'\xff\xd8' or file_bytes[0:4] == b'\x89PNG':
+            return False
+        return len(file_bytes) > 1000
     
     # 图片文件魔数检查
     else:
@@ -431,7 +404,7 @@ def _validate_media_file(filepath, media_type):
         
         # 读取文件头验证
         with open(filepath, 'rb') as f:
-            file_bytes = f.read(12)
+            file_bytes = f.read(4096)
         
         return _validate_file_content(file_bytes, media_type)
     except Exception as e:
@@ -1950,72 +1923,13 @@ def save_alert(post, keywords, ai_analysis=None, source=None, downloaded_media_p
     media = extract_media(atts)
     _content = derive_content(post, atts)
     
-    # 转换媒体URL为本地API路径（在保存前转换，避免每次加载都重新转换）
-    # 这样可以降低访问 Truth Social 的频率，因为URL已经保存在文件中
-    if media:
-        try:
-            # 检查每个媒体项，如果本地文件存在，转换为本地路径
-            converted_media = []
-            for m in media:
-                new_m = m.copy() if isinstance(m, dict) else dict(m)
-                original_url = m.get('url') or m.get('preview_url') or ''
-                media_type = (m.get('type') or '').lower()
-                
-                # 判断是否为视频（多种方式检测）
-                is_video = (
-                    media_type in ('video', 'gifv') or
-                    (original_url and any(ext in original_url.lower() for ext in ['.mp4', '.webm', '.mov', '.avi', '.mkv', '/videos/']))
-                )
-                
-                # 如果URL是远程URL，尝试查找本地文件
-                if original_url and original_url.startswith(('http://', 'https://')):
-                    # 确定保存目录
-                    save_dir = VIDEOS_DIR if is_video else IMAGES_DIR
-                    # 生成文件名（与 dashboard.py 和 get_local_media_path 中的逻辑一致）
-                    url_hash = hashlib.md5(original_url.encode('utf-8')).hexdigest()[:12]
-                    
-                    # 从URL提取扩展名
-                    from urllib.parse import urlparse
-                    parsed = urlparse(original_url)
-                    path = parsed.path
-                    if '.' in path:
-                        ext = os.path.splitext(path)[1].lower()
-                        if '?' in ext:
-                            ext = ext.split('?')[0]
-                    else:
-                        ext = '.mp4' if is_video else '.jpg'
-                    
-                    # 确保扩展名正确
-                    if is_video:
-                        if ext not in ['.mp4', '.webm', '.mov', '.avi', '.mkv', '.gif']:
-                            ext = '.mp4'
-                    else:
-                        if ext not in ['.jpg', '.jpeg', '.png', '.gif', '.webp']:
-                            ext = '.jpg'
-                    
-                    filename = f"{url_hash}{ext}"
-                    filepath = os.path.join(save_dir, filename)
-                    
-                    # 如果本地文件存在，转换为API路径
-                    if os.path.exists(filepath):
-                        rel_path = os.path.relpath(filepath, MEDIA_DIR)
-                        api_path = '/api/media/' + rel_path.replace('\\', '/')
-                        new_m['url'] = api_path
-                        if 'preview_url' in new_m:
-                            new_m['preview_url'] = api_path
-                        new_m['original_url'] = original_url  # 保存原始URL用于调试
-                    else:
-                        # 文件不存在，保留原始URL（可能还未下载）
-                        if is_video:
-                            pass
-                
-                converted_media.append(new_m)
-            
-            media = converted_media
-            converted_count = sum(1 for m in converted_media if m.get('url', '').startswith('/api/media/'))
-        except Exception as e:
-            import traceback
-            traceback.print_exc()
+    # 优先使用实际下载成功的路径生成本地媒体 URL，避免依赖原始 URL 的 hash/扩展名。
+    if media and downloaded_media_paths:
+        media = serialize_local_media(media, downloaded_media_paths)
+    elif media:
+        media = [dict(item) if isinstance(item, dict) else {} for item in media]
+
+    # 未提供下载路径时保留原始 URL，供旧告警兼容。
 
     alert_data = {
         "id": post.get("id"),
